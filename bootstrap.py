@@ -41,14 +41,13 @@ def load_manifest() -> list[str]:
     return [str(x) for x in files]
 
 
-def fetch_github(repo: str, ref: str, rel: str) -> bytes:
-    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{quote(rel, safe='/')}"
+def _fetch_once(url: str) -> bytes:
     try:
         import requests  # 已装依赖时优先用 requests，证书处理更稳
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200:
             raise RuntimeError(f"HTTP {resp.status_code}")
-        data = resp.content
+        return resp.content
     except ImportError:
         import ssl
         try:
@@ -57,18 +56,26 @@ def fetch_github(repo: str, ref: str, rel: str) -> bytes:
         except ImportError:
             ctx = ssl.create_default_context()
         req = Request(url, headers={"User-Agent": "book-to-question-toolkit"})
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            if getattr(resp, "status", 200) != 200:
+                raise RuntimeError(f"HTTP {resp.status}")
+            return resp.read()
+
+
+def fetch_github(repo: str, ref: str, rel: str) -> bytes:
+    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{quote(rel, safe='/')}"
+    last: Exception | None = None
+    for attempt in range(3):
         try:
-            with urlopen(req, timeout=30, context=ctx) as resp:
-                if getattr(resp, "status", 200) != 200:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                data = resp.read()
-        except Exception as e:
-            raise RuntimeError(f"下载失败 {rel}: {e}") from e
-    except Exception as e:
-        raise RuntimeError(f"下载失败 {rel}: {e}") from e
-    if not data:
-        raise RuntimeError(f"下载为空：{rel}")
-    return data
+            data = _fetch_once(url)
+            if data:
+                return data
+            last = RuntimeError("下载为空")
+        except Exception as e:  # 瞬时 SSL/EOF/5xx 都重试
+            last = e
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"下载失败 {rel}: {last}") from last
 
 
 def atomic_write(target: Path, data: bytes) -> None:
@@ -78,6 +85,10 @@ def atomic_write(target: Path, data: bytes) -> None:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
         os.replace(tmp, target)
+        try:
+            os.chmod(target, 0o644)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp):
             try:
