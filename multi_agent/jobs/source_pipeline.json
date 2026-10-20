@@ -1,0 +1,80 @@
+[
+  {
+    "id": "kimi_src",
+    "agent": "kimi_from_source",
+    "provider": "kimi",
+    "system_prompts": [
+      "md/知识点总结提示词V5.1.md",
+      "multi_agent/prompts/kimi_agent.md"
+    ],
+    "inputs": ["exports/multi_agent/inputs/source.md"],
+    "output": "exports/multi_agent/inputs/kimi_from_source.md",
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "stream": true,
+    "show_thinking": true,
+    "auto_chunk": true
+  },
+  {
+    "id": "deepseek_src",
+    "agent": "deepseek_from_source",
+    "provider": "openai_compat",
+    "system_prompts": [
+      "md/知识点总结提示词V5.1.md",
+      "multi_agent/prompts/deepseek_agent.md"
+    ],
+    "inputs": ["exports/multi_agent/inputs/source.md"],
+    "output": "exports/multi_agent/inputs/deepseek_from_source.md",
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "key_env": "DEEPSEEK_API_KEY",
+    "base": "https://api.deepseek.com/v1",
+    "stream": true,
+    "show_thinking": true,
+    "auto_chunk": true
+  },
+  {
+    "id": "doubao_src",
+    "agent": "doubao_from_source",
+    "provider": "openai_compat",
+    "model": "doubao-seed-2-1-turbo-260628",
+    "system_prompts": [
+      "md/知识点总结提示词V5.1.md",
+      "multi_agent/prompts/doubao_agent.md"
+    ],
+    "inputs": ["exports/multi_agent/inputs/source.md"],
+    "output": "exports/multi_agent/inputs/doubao_from_source.md",
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "key_env": "ARK_API_KEY",
+    "base": "https://ark.cn-beijing.volces.com/api/v3",
+    "timeout": 300,
+    "stream": true,
+    "show_thinking": true,
+    "auto_chunk": true
+  },
+  {
+    "id": "merge_all",
+    "agent": "deepseek_merge_from_source",
+    "provider": "openai_compat",
+    "system_prompts": [
+      "md/知识点总结提示词V5.1.md",
+      "multi_agent/prompts/llm_merge_agent.md"
+    ],
+    "inputs": [
+      "exports/multi_agent/inputs/kimi_from_source.md",
+      "exports/multi_agent/inputs/deepseek_from_source.md",
+      "exports/multi_agent/inputs/doubao_from_source.md",
+      "exports/multi_agent/inputs/gemini_from_source.md"
+    ],
+    "output": "exports/multi_agent/final/merged_from_source.md",
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "key_env": "DEEPSEEK_API_KEY",
+    "base": "https://api.deepseek.com/v1",
+    "stream": true,
+    "show_thinking": true,
+    "auto_chunk": true,
+    "deps": ["kimi_src", "deepseek_src", "doubao_src"]
+  }
+]

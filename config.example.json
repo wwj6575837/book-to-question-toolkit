@@ -1,0 +1,121 @@
+{
+  "_comment": "=== MinerU 批量PDF转换器配置文件 ===",
+  "_last_updated": "2026-05-09",
+  "api_token": "请替换为您的MinerU API Token",
+  "_token_help": {
+    "获取步骤": [
+      "1. 访问 https://mineru.net",
+      "2. 注册账号并登录",
+      "3. 获取API Token",
+      "4. 将Token粘贴到上面的api_token字段"
+    ],
+    "注意事项": "请妥善保管您的API Token，不要分享给他人"
+  },
+  "default_options": {
+    "_comment": "=== 默认转换选项 - 根据需要调整 ===",
+    "_backend_note": "VLM 会端到端理解版面，常把图中字写成 text_image；要插图仍以图片为主请用 pipeline。",
+    "_oss_vs_cloud": [
+      "你贴的是自部署 MinerU 的 FastAPI 表单接口：backend（pipeline / hybrid-auto-engine / vlm-auto-engine 等）、image_analysis、parse_method（auto|txt|ocr）、lang_list、formula_enable、table_enable。",
+      "本仓库 mineru_batch_converter 调用的是 mineru.net API v4（JSON）：仅 model_version（pipeline|vlm|MinerU-HTML）、is_ocr、enable_formula、enable_table、language 等，见 md/MinerUAPI.md。两套参数名不同，不能照搬 Form 字段名到 v4。",
+      "开源里的 image_analysis=false 可关闭 VLM/hybrid 对图/表的「分析」；云端 v4 若文档未列出该字段，则无法在现有脚本里透传，需等官方支持或改用自部署 HTTP 解析。"
+    ],
+    "is_ocr": false,
+    "enable_formula": true,
+    "enable_table": true,
+    "language": "ch",
+    "model_version": "pipeline",
+    "extra_formats": [
+      "html",
+      "docx"
+    ],
+    "check_interval": 30,
+    "_options_help": {
+      "is_ocr": "pipeline 下关闭可减少扫描件 OCR；VLM 仍可能自行抽图中文字",
+      "enable_formula": "数学公式识别 - 识别LaTeX格式的数学公式",
+      "enable_table": "表格识别 - 保持表格结构和格式",
+      "language": "语言设置: auto(自动)/zh(中文)/en(英文)",
+      "model_version": "pipeline=传统布局+插图多为图片；vlm=更强语义但易把图中字变成 text_image 文本；MinerU-HTML 仅 HTML 源",
+      "extra_formats": "额外输出格式: html, docx, json可选",
+      "check_interval": "任务状态检查间隔(秒) - 推荐30-60秒"
+    }
+  },
+  "directories": {
+    "_comment": "=== 目录设置 ===",
+    "default_pdf_directory": "D:\\desktop\\普通高中教科书·通用技术必修 技术与设计1（已拆分）",
+    "recursive_search": true,
+    "_directory_help": {
+      "default_pdf_directory": "PDF文件搜索的根目录 - 可以是绝对路径或相对路径",
+      "recursive_search": true,
+      "使用建议": [
+        "建议创建专门的PDF目录如: D:\\\\PDFs或./pdfs",
+        "支持中文路径，但建议使用英文路径避免兼容性问题",
+        "启用递归搜索可以处理复杂的目录结构"
+      ]
+    }
+  },
+  "qiniu": {
+    "_comment": "解压完成后：无损压缩→上传七牛→替换为 HTML。图题/表题可在 ![](...) 上或下。HTML <table> 可配对上下表注（pair_table_captions，须以表/表注/Table 等开头，可无「几-几」）。表格内 <img> 见 html_img_use_intrinsic_size。本地 images 保留。AK/SK 用环境变量",
+    "enabled": true,
+    "bucket": "mz-edu",
+    "domain": "https://cdn.maiziedu.cn",
+    "key_prefix": "images/tp",
+    "img_width_pct": 50,
+    "require_figure_caption": true,
+    "html_img_use_intrinsic_size": true,
+    "pair_table_captions": true
+  },
+  "limits": {
+    "_comment": "=== 与 MinerU 精准解析 API 官方文档一致的参考值（业务校验以 mineru_batch_converter 内常量为准）===",
+    "max_files_per_file_urls_batch": 50,
+    "max_file_size_mb": 200,
+    "max_pages": 200,
+    "daily_priority_pages": 1000,
+    "_limits_info": {
+      "说明": "本地上传走 /file-urls/batch 时，单次最多申请 50 个上传链接；脚本会自动分批。对比表中的「批量≤200」多指 URL 批量等场景，以官网为准。",
+      "max_files_per_file_urls_batch": "单次申请上传链接最多 50 个文件",
+      "max_file_size_mb": "单个文件最大 200MB",
+      "max_pages": "单个文件最多 200 页",
+      "daily_priority_pages": "每账号每日约 1000 页高优先级解析额度，超出部分优先级降低（具体以官网账户规则为准）"
+    }
+  },
+  "advanced": {
+    "_comment": "=== 高级设置 - 一般无需修改 ===",
+    "max_wait_time": 3600,
+    "download_retries": 8,
+    "upload_timeout": 900,
+    "download_chunk_size": 524288,
+    "download_segment_bytes": 1048576,
+    "force_segment_download": false,
+    "file_urls_batch_size": 50,
+    "_advanced_help": {
+      "max_wait_time": "最大等待处理时间: 3600秒(1小时) - 大文件处理可能需要更长时间",
+      "download_retries": "下载失败重试次数 - 网络不稳定时可增大",
+      "upload_timeout": "文件上传超时（秒）- 大文件可适当增大",
+      "file_urls_batch_size": "每批申请上传链接的文件数，最大 50（与官方 /file-urls/batch 一致）",
+      "调优建议": [
+        "如果经常处理大文件，可适当增加max_wait_time和upload_timeout",
+        "网络环境不稳定时，可增加download_retries数量",
+        "处理小文件时，可适当减少check_interval提高响应速度"
+      ]
+    }
+  },
+  "_usage_guide": {
+    "_comment": "=== 使用指南 ===",
+    "快速开始": [
+      "1. 设置api_token - 从https://mineru.net获取",
+      "2. 检查default_pdf_directory路径是否正确",
+      "3. 运行: python run_converter.py"
+    ],
+    "测试步骤": [
+      "1. 运行: python test_converter.py",
+      "2. 检查环境和配置是否正确",
+      "3. 在测试目录放入1-2个小PDF文件进行测试"
+    ],
+    "注意事项": [
+      "首次使用请先运行setup_wizard.py进行初始配置",
+      "请保证PDF文件小于200MB且页数不超过200页（官方精准解析上限）",
+      "每日约1000页高优先级额度，超出部分优先级降低，以官网说明为准",
+      "单次本地上传最多50个文件一批，脚本会自动分批；处理结果在同目录'*_mineru_output'文件夹中"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+.venv/
+.env
+config.json
+exports/
+拆书/
+补题/详细版/
+补题/拆分后/
+补题/题目/
+补题/配置/
+.book-to-question-backup/
+__pycache__/
+*.pyc
+*.pdf
+*.docx
+.DS_Store
