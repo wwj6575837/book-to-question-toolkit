@@ -13,3 +13,7 @@ __pycache__/
 *.pdf
 *.docx
 .DS_Store
+
+# 私密密钥文档
+*keys*.local.md
+*-keys*.md
