@@ -33,6 +33,19 @@ python bootstrap.py
 
 最后**在仓库根打开 Claude Code**，`.claude/skills/book-to-question/` 才会被发现。
 
+## 从私密文档自动配置密钥
+
+如果手上有一份按本仓库格式写的密钥 Markdown：
+
+```bash
+python apply_keys.py --keys-md /path/to/book-to-question-keys.local.md
+# 或指定目标项目
+python apply_keys.py --keys-md ... --repo-root /path/to/project
+```
+
+脚本会合并 `.env`、更新 `config.json` 的 `api_token`，旧文件备份到 `.book-to-question-backup/`；
+只输出键名和状态，不输出密钥值。密钥文档不要提交或上传。
+
 ## 安装到现有项目
 
 ```bash

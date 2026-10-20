@@ -18,6 +18,7 @@
     ".claude/skills/book-to-question/scripts/validate_questions.py",
     ".claude/skills/book-to-question/scripts/yuque_upload.py",
     "advanced_markdown_reorganizer.py",
+    "apply_keys.py",
     "md/命题官提示词系统 V3.2.md",
     "md/标题层级排序.md",
     "md/知识点总结提示词V5.1.md",
