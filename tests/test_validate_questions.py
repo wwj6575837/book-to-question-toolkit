@@ -48,6 +48,79 @@ def test_near_duplicate_across_chapters_warns():
     assert any("跨章近似题" in w for w in warnings)
 
 
+def option_question(title, tag, typ="choice", answer="A", count=4):
+    keys = "ABCDEFGH"[:count]
+    return {
+        "know_id": 999,
+        "type": typ,
+        "tags": tag,
+        "source": "《测试书》",
+        "title": title,
+        "options": [{"key": k, "name": f"选项{k}"} for k in keys],
+        "answer": answer,
+        "parse": f"本题选 **{answer}**。",
+        "difficulty": 0.5,
+    }
+
+
+def answer_pairs(typ, answers, count=4):
+    return [(typ, answer, count) for answer in answers]
+
+
+def test_single_choice_concentration_warns():
+    warnings = []
+    data = answer_pairs("choice", ["A"] * 10)
+
+    vq.check_answer_balance({"第一章": data}, data, warnings)
+
+    assert any("单选答案集中" in w for w in warnings)
+    assert any("缺失" in w for w in warnings)
+
+
+def test_balanced_single_choice_has_no_warning():
+    warnings = []
+    data = answer_pairs("choice", list("ABCD") * 5)
+
+    vq.check_answer_balance({"第一章": data}, data, warnings)
+
+    assert not any("单选答案" in w or "多选答案" in w for w in warnings)
+
+
+def test_multiple_combo_concentration_warns():
+    warnings = []
+    data = answer_pairs("multiple", ["ABC"] * 12)
+
+    vq.check_answer_balance({}, data, warnings)
+
+    assert any("多选答案组合集中" in w for w in warnings)
+
+
+def test_main_prints_answer_distribution(tmp_path, capsys):
+    qdir = tmp_path / "questions"
+    qdir.mkdir()
+    items = [
+        option_question(f"单选题{i}", "测试书-第一章", "choice", answer)
+        for i, answer in enumerate("ABCD")
+    ]
+    items += [
+        option_question(f"多选题{i}", "测试书-第一章", "multiple", "AB")
+        for i in range(2)
+    ]
+    chapter = qdir / "第一章.json"
+    chapter.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+
+    rc = vq.main(
+        ["--id", "999", "--book", "测试书", "--questions-dir", str(qdir)]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "单选答案：" in out
+    assert "多选组合：" in out
+    saved = json.loads(chapter.read_text(encoding="utf-8"))
+    assert [q["answer"] for q in saved[:4]] == list("ABCD")
+
+
 def test_expected_difficulty_ratios(tmp_path):
     cfg = tmp_path / "config.json"
     cfg.write_text(

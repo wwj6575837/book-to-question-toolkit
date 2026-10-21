@@ -255,6 +255,99 @@ def check_difficulty_distribution(
                     add(f"{chapter} 难度「{name}」占比 {actual:.0%}，目标 {ratio:.0%}，偏差 {diff:.0%}")
 
 
+def collect_option_answers(q: dict) -> list[tuple[str, str, int]]:
+    """收集 choice/multiple 的 (type, answer, 选项数)，group 递归。"""
+    out: list[tuple[str, str, int]] = []
+
+    def take(item) -> None:
+        if not isinstance(item, dict):
+            return
+        typ = item.get("type")
+        if typ not in ("choice", "multiple"):
+            return
+        answer = str(item.get("answer") or "").strip()
+        if not answer:
+            return
+        opts = item.get("options")
+        count = len(opts) if isinstance(opts, list) else 0
+        out.append((typ, answer, count))
+
+    take(q)
+    subs = q.get("subs")
+    if isinstance(subs, list):
+        for sub in subs:
+            take(sub)
+    return out
+
+
+def answer_distribution(pairs: list[tuple[str, str, int]]) -> tuple[str, str]:
+    choices = Counter(answer for typ, answer, _ in pairs if typ == "choice")
+    n = sum(choices.values())
+    single = ""
+    if n:
+        single = "，".join(
+            f"{k} {choices.get(k, 0)}({choices.get(k, 0) / n:.0%})" for k in "ABCD"
+        )
+    multiples = Counter(answer for typ, answer, _ in pairs if typ == "multiple")
+    total = sum(multiples.values())
+    multi = ""
+    if total:
+        multi = "，".join(
+            f"{k} {v}({v / total:.0%})" for k, v in multiples.most_common(5)
+        )
+    return single, multi
+
+
+def check_answer_balance(
+    chapter_answers: dict[str, list[tuple[str, str, int]]],
+    all_answers: list[tuple[str, str, int]],
+    warns: list[str],
+) -> None:
+    """只报告答案字母分布，不修改任何题目。"""
+
+    def check(label: str, pairs: list[tuple[str, str, int]], min_n: int) -> None:
+        choices = [(answer, count) for typ, answer, count in pairs if typ == "choice"]
+        n = len(choices)
+        if n >= min_n:
+            counts = Counter(answer for answer, _ in choices)
+            worst = max(counts.values()) / n
+            if worst > 0.60:
+                letter, count = counts.most_common(1)[0]
+                warns.append(f"{label}单选答案集中：{letter} {count}/{n}（{worst:.0%}）")
+            for letter in "ABCD":
+                index = "ABCD".index(letter)
+                available = sum(1 for _answer, count in choices if count > index)
+                if available >= min_n and counts.get(letter, 0) == 0:
+                    warns.append(
+                        f"{label}单选答案缺失：{letter}（可用 {available} 题，0 题选它）"
+                    )
+        if n >= 50:
+            counts = Counter(answer for answer, _ in choices)
+            for letter in "ABCD":
+                index = "ABCD".index(letter)
+                available = sum(1 for _answer, count in choices if count > index)
+                if available < 50:
+                    continue
+                ratio = counts.get(letter, 0) / n
+                if abs(ratio - 0.25) > 0.15:
+                    warns.append(
+                        f"{label}单选 {letter} 占比 {ratio:.0%}，偏离 25% 超过 15 个百分点"
+                    )
+        multiples = [answer for typ, answer, _ in pairs if typ == "multiple"]
+        if len(multiples) >= 8:
+            counts = Counter(multiples)
+            combo, count = counts.most_common(1)[0]
+            ratio = count / len(multiples)
+            if ratio > 0.50:
+                warns.append(
+                    f"{label}多选答案组合集中：{combo} {count}/{len(multiples)}（{ratio:.0%}）"
+                )
+
+    check("全书", all_answers, 50)
+    for chapter, pairs in chapter_answers.items():
+        check(f"{chapter} ", pairs, 8)
+
+
 def cross_chapter_dups(records: list[tuple[str, str]], errs: list[str], warns: list[str]) -> None:
     """records = [(chapter_stem, title)]。跨章完全相同记错误，≥0.90 记警告。"""
     exact: dict[str, str] = {}
@@ -327,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
     chapter_counts: dict[str, int] = {}
     chapter_diffs: dict[str, list[float]] = {}
     all_diffs: list[float] = []
+    chapter_answers: dict[str, list[tuple[str, str, int]]] = {}
+    all_answers: list[tuple[str, str, int]] = []
     dedup_records: list[tuple[str, str]] = []
 
     skip = {"all.json", "config.json", "progress.json"}
@@ -358,6 +453,9 @@ def main(argv: list[str] | None = None) -> int:
                 diffs = collect_difficulties(q)
                 chapter_diffs.setdefault(path.stem, []).extend(diffs)
                 all_diffs.extend(diffs)
+                answers = collect_option_answers(q)
+                chapter_answers.setdefault(path.stem, []).extend(answers)
+                all_answers.extend(answers)
         if expected is not None:
             dev = abs(len(obj) - expected) / expected
             if dev > 0.2:
@@ -375,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
     check_difficulty_distribution(
         chapter_diffs, all_diffs, expected_ratio, errs, warns, args.strict_difficulty
     )
+    check_answer_balance(chapter_answers, all_answers, warns)
 
     total = sum(chapter_counts.values())
     print(f"目录：{qdir}")
@@ -385,6 +484,11 @@ def main(argv: list[str] | None = None) -> int:
         print("题型分布：" + "，".join(f"{k}={v}" for k, v in sorted(type_dist.items())))
     if all_diffs:
         print("难度分布：" + _band_text(all_diffs))
+    single, multi = answer_distribution(all_answers)
+    if single:
+        print("单选答案：" + single)
+    if multi:
+        print("多选组合：" + multi)
 
     failed = qdir / "_failed.txt"
     if failed.exists():
