@@ -30,19 +30,21 @@ metadata:
 
 ## 首次使用 / 给同事用
 
-在仓库根先跑顶层自举（建 `.venv`、装最小依赖、生成配置模板）：
+按所在仓库二选一：
+
+- **精简仓库**（根目录有 `bootstrap.py`）：先在仓库根跑顶层自举（建 `.venv`、装最小依赖、生成配置模板）：
 
 ```powershell
 python bootstrap.py
 ```
 
-如果需要单独复查/修补 skill 依赖：
+- **主仓库 / 已有项目**（没有顶层 `bootstrap.py`）：跑 skill 自检：
 
 ```powershell
 .venv\Scripts\python.exe .claude\skills\book-to-question\scripts\bootstrap.py --check
 ```
 
-它会检查 `补题/` 目录、命题官脚本、提示词、Python 依赖和密钥缺项。  
+skill 自检会检查 `补题/` 目录、命题官脚本、提示词、Python 依赖和密钥缺项。  
 `题目数分配.py` 当前 skill 不需要，不会复制。
 
 ## 使用方式
@@ -65,7 +67,11 @@ python bootstrap.py
 - 仓库根：当前工作目录（skill 所在仓库），命令都用相对路径。
 - Python：不要用系统 python。Windows 用 `.venv\Scripts\python.exe`；macOS/Linux 用 `.venv/bin/python`。
 - 本 skill：`.claude\skills\book-to-question\`，脚本在 `scripts\`。
-- 书目录必须是 `<id>-<书名>` 格式；organizer 用目录名当书名。
+- 命名别混：
+  - 磁盘书目录、章节 PDF、语雀子分组：`<id>-<书名>`；
+  - 补题的正文/配置/题目中间文件：`<id><书名>.md`（不带连字符）；
+  - 详细版/精简版产物：`<id>-1 <书名>.md` / `<id>-2 <书名>.md`。
+- organizer 用磁盘目录名当书名。
 - 所有命令都在**仓库根**执行。
 - 本仓库不含任何真实密钥。每个使用者自己配置：
   - `cp config.example.json config.json`，填自己的 MinerU token；
@@ -201,7 +207,7 @@ cd /path/to/MinerU
 ```
 
    - 产物：`exports\Organized_Books\<id>-<书名>_organized\`。
-   - `--backup-existing` 会把旧目录改名为 `.bak-时间戳`；用户明确同意删除时才用 `--force-delete`。
+   - `--backup-existing` 会把旧目录改名为 `.bak-时间戳`；用户明确同意删除时才用 `--confirm-delete`。
 3. 归一化标题层级（MinerU 常把所有标题都输出成 `##`）：
 
 ```powershell

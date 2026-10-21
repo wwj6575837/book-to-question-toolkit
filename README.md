@@ -81,6 +81,25 @@ python bootstrap.py --install-into /path/to/project --from-github
 4. 上题（`补题/命题官批量生成.py`）
 5. 精简版（`chapter_pipeline1.py`，可选，上题后询问）
 
+## 数据去向
+
+跑流程时，数据会分别送到这些外部服务，使用前请确认可以接受：
+
+| 服务 | 收到什么 | 用途 |
+|---|---|---|
+| MinerU（`mineru.net`） | 上传的 PDF | 版面解析、OCR、图片/表格提取 |
+| DeepSeek / 豆包 / Kimi | 章节正文或题目上下文 | 生成详细版、精简版、题目 |
+| 七牛云 | Markdown 里引用的图片 | 上传后替换为 CDN 链接 |
+| 语雀 | 原书/详细版/精简版 Markdown 文档 | 上传到指定知识库分组 |
+
+拆书产物、缓存、`book.json`、题目 JSON 都只留在本地；`.env` 和 `config.json` 不会被提交。
+
+## 最常卡住的三件事
+
+1. **路径与命名**：所有命令都在仓库根执行；书目录必须是 `<id>-<书名>`。路径含中文/空格时加引号。
+2. **密钥与 token**：MinerU `api_token` 在 `config.json`，LLM/七牛/语雀在 `.env`。语雀 401/403 通常是 token 失效或缺 `repo:write`/`doc:write` 权限。
+3. **已有产物**：`organize` 遇到已存在的 `_organized` 目录、详细版已存在、题目已生成时都会停下。按提示用 `--backup-existing`，或确认后再加 `--force` / `--overwrite`。
+
 ## 版本与同步
 
 部分脚本来自主仓库 `wwj6575837/mineru-toolkit`。本仓库是拆书上题链路的精简副本；主仓库更新后需要同步对应文件。`manifest.json` 列出了受管文件清单。

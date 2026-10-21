@@ -110,15 +110,15 @@ def cmd_organize(args: argparse.Namespace) -> int:
             print(f"已存在目标目录，先备份：{target.name} -> {backup.name}")
             if not args.dry_run:
                 target.rename(backup)
-        elif args.force_delete:
-            print(f"已存在目标目录，按 --force-delete 删除：{target}", file=sys.stderr)
+        elif args.confirm_delete:
+            print(f"已存在目标目录，按 --confirm-delete 删除：{target}", file=sys.stderr)
             if not args.dry_run:
                 import shutil
                 shutil.rmtree(target)
         else:
             print(
                 f"目标目录已存在：{target}\n"
-                "拒绝直接覆盖（organizer 会 rmtree）。请加 --backup-existing 或 --force-delete。",
+                "拒绝直接覆盖（organizer 会 rmtree）。请加 --backup-existing 或 --confirm-delete。",
                 file=sys.stderr,
             )
             return 3
@@ -152,10 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("organize", help="*_mineru_output -> exports/Organized_Books")
     po.add_argument("--source", required=True, help="书目录（含 *_mineru_output）")
     po.add_argument("--target-base", default=str(ORGANIZED_ROOT))
-    po.add_argument("--backup-existing", action="store_true",
-                    help="目标 <书目录名>_organized 已存在时先改名备份")
-    po.add_argument("--force-delete", action="store_true",
-                    help="目标已存在时直接删除（需用户明确确认）")
+    g = po.add_mutually_exclusive_group()
+    g.add_argument("--backup-existing", action="store_true",
+                   help="目标 <书目录名>_organized 已存在时先改名备份")
+    g.add_argument("--confirm-delete", "--force-delete", dest="confirm_delete",
+                   action="store_true",
+                   help="目标已存在时直接删除（需用户明确确认）")
     po.add_argument("--dry-run", action="store_true")
     po.set_defaults(func=cmd_organize)
     return p

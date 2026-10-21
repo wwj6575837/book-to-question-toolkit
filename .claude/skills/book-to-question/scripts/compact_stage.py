@@ -124,15 +124,17 @@ def build_run_cmd(args: argparse.Namespace) -> list[str]:
         sys.executable, "-m", "multi_agent.chapter_pipeline1",
         "--ids", str(args.id),
         "--auto-chunk",
-        "--max-workers", "6",
-        "--chapter-max-workers", "7",
+        "--max-workers", str(args.max_workers or 6),
+        "--chapter-max-workers", str(args.chapter_max_workers or 7),
         "--resume-partial",
         "--skip-merge-unchanged",
         "--limit-deepseek", "15",
         "--limit-doubao", "15",
-        "--retries", "2",
+        "--retries", str(args.retries if args.retries is not None else 2),
         "--retry-backoff", "10",
     ]
+    if args.chapters:
+        cmd.extend(["--chapters", *[str(x) for x in args.chapters]])
     if args.force:
         cmd.append("--force")
     if args.split_by_section:
@@ -171,13 +173,31 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if len(cblocks) != len(dblocks):
         warnings.append(f"## 数量不一致：详细版 {len(dblocks)}，精简版 {len(cblocks)}")
 
+    dtitles = [t for t, _ in dblocks]
+    ctitles = [t for t, _ in cblocks]
+    if dtitles != ctitles:
+        diff = [(a, b) for a, b in zip(dtitles, ctitles) if a != b][:5]
+        warnings.append(f"标题/顺序与详细版不一致：{diff}")
     empty = [t for t, body in cblocks if not body]
     if empty:
         warnings.append(f"空章 {len(empty)} 个：{empty[:5]}")
-    titles = [t for t, _ in cblocks]
-    dup = sorted({t for t in titles if titles.count(t) > 1})
+    dup = sorted({t for t in ctitles if ctitles.count(t) > 1})
     if dup:
         warnings.append(f"重复标题：{dup[:5]}")
+
+    prog_path = Path(args.progress) if args.progress else (
+        REPO_ROOT / "exports" / "multi_agent" / "final" / "精简版-按章" / "progress.json"
+    )
+    if prog_path.exists():
+        try:
+            prog = json.loads(prog_path.read_text(encoding="utf-8-sig"))
+            st = str(prog.get("books", {}).get(str(args.id), {}).get("status") or "")
+            if st and st != "done":
+                errors.append(f"精简版流水线状态为 {st}（progress.json）")
+        except (OSError, json.JSONDecodeError):
+            warnings.append(f"progress.json 读取失败：{prog_path}")
+    else:
+        warnings.append(f"没有 progress.json：{prog_path}")
 
     ratio = compact.stat().st_size / max(1, detail.stat().st_size)
     print(f"体积比：{ratio:.0%}")
@@ -225,6 +245,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--force", action="store_true", help="透传 --force（全量重跑）")
     pr.add_argument("--split-by-section", action="store_true",
                     help="按 ### 节拆分（chapter_pipeline1 的 --split-by-section）")
+    pr.add_argument("--chapters", nargs="*", help="只跑指定章节号/范围")
+    pr.add_argument("--retries", type=int, help="覆盖重试次数（默认 2）")
+    pr.add_argument("--max-workers", type=int, help="覆盖 max-workers（默认 6）")
+    pr.add_argument("--chapter-max-workers", type=int, help="覆盖章节并发（默认 7）")
     pr.add_argument("--yes", action="store_true", help="实际执行；默认只打印命令")
     pr.set_defaults(func=cmd_run)
 
@@ -233,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--book")
     pv.add_argument("--detail", help="显式指定详细版文件")
     pv.add_argument("--compact", help="显式指定精简版文件")
+    pv.add_argument("--progress", help="精简版 progress.json（默认自动定位）")
     pv.add_argument("--book-json", help="更新 book.json 的 stages.compact")
     pv.set_defaults(func=cmd_verify)
     return p

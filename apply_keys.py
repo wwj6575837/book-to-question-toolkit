@@ -17,12 +17,18 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 DOTENV_BLOCK = re.compile(r"```dotenv\s*\n(.*?)```", re.S)
 MINERU_BLOCK = re.compile(r"##\s*MinerU token.*?```text\s*\n(.*?)```", re.S)
+ENV_ASSIGN = re.compile(
+    r"^(?P<prefix>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<eq>\s*=\s*)(?P<value>.*)$"
+)
 
 
 def parse_keys(md_path: Path) -> tuple[dict[str, str], str]:
@@ -33,10 +39,12 @@ def parse_keys(md_path: Path) -> tuple[dict[str, str], str]:
     env: dict[str, str] = {}
     for line in m.group(1).splitlines():
         s = line.strip()
+        if s.startswith("export "):
+            s = s[len("export "):].lstrip()
         if not s or s.startswith("#") or "=" not in s:
             continue
         k, v = s.split("=", 1)
-        env[k.strip()] = v.strip().strip('"').strip("'")
+        env[k.strip()] = _split_env_value(v.strip())[2]
 
     m2 = MINERU_BLOCK.search(text)
     if not m2:
@@ -47,27 +55,81 @@ def parse_keys(md_path: Path) -> tuple[dict[str, str], str]:
     return env, token
 
 
+def _split_env_value(raw: str) -> tuple[str, str, str, str]:
+    """把 = 后面的原文拆成 (前导空白, 引号, 值, 尾部空格+注释)。"""
+    indent = raw[: len(raw) - len(raw.lstrip())]
+    rest = raw.lstrip()
+    if rest[:1] in ("'", '"'):
+        quote = rest[0]
+        end = rest.find(quote, 1)
+        if end != -1:
+            return indent, quote, rest[1:end], rest[end + 1 :]
+    m = re.search(r"\s+#", rest)
+    if m:
+        return indent, "", rest[: m.start()].rstrip(), rest[m.start() :]
+    return indent, "", rest.rstrip(), ""
+
+
+def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _file_mode(path: Path, default: int = 0o600) -> int:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return default
+
+
+def _make_backup_dir(repo: Path) -> Path:
+    root = repo / ".book-to-question-backup"
+    base = time.strftime("%Y%m%d-%H%M%S-%f")
+    candidate = root / base
+    n = 1
+    while candidate.exists():
+        candidate = root / f"{base}-{n}"
+        n += 1
+    candidate.mkdir(parents=True, exist_ok=False)
+    return candidate
+
+
 def merge_dotenv(path: Path, values: dict[str, str]) -> None:
     lines = path.read_text(encoding="utf-8-sig").splitlines() if path.exists() else []
+    mode = _file_mode(path)
     seen = set()
     out = []
     for line in lines:
-        s = line.strip()
-        if s and not s.startswith("#") and "=" in s:
-            k = s.split("=", 1)[0].strip()
-            if k in values:
-                out.append(f"{k}={values[k]}")
-                seen.add(k)
-                continue
+        m = ENV_ASSIGN.match(line)
+        if m and m.group("key") in values:
+            key = m.group("key")
+            indent, quote, _old, tail = _split_env_value(m.group("value"))
+            out.append(
+                f"{m.group('prefix')}{key}{m.group('eq')}"
+                f"{indent}{quote}{values[key]}{quote}{tail}"
+            )
+            seen.add(key)
+            continue
         out.append(line)
     for k, v in values.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _atomic_write(path, "\n".join(out).rstrip() + "\n", mode=mode)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,37 +164,38 @@ def main(argv: list[str] | None = None) -> int:
         print("（dry-run，没有写文件）")
         return 0
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = repo / ".book-to-question-backup" / stamp
     env_path = repo / ".env"
     cfg_path = repo / "config.json"
     example = repo / "config.example.json"
 
+    backup = None
     try:
-        if env_path.exists():
-            backup.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(env_path, backup / ".env")
+        if env_path.exists() or cfg_path.exists():
+            backup = _make_backup_dir(repo)
+            if env_path.exists():
+                shutil.copy2(env_path, backup / ".env")
+            if cfg_path.exists():
+                shutil.copy2(cfg_path, backup / "config.json")
         merge_dotenv(env_path, values)
 
+        cfg_mode = _file_mode(cfg_path)
         if cfg_path.exists():
             data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-            backup.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cfg_path, backup / "config.json")
         else:
             if not example.exists():
                 raise FileNotFoundError("config.json 不存在，且没有 config.example.json")
             data = json.loads(example.read_text(encoding="utf-8-sig"))
         data["api_token"] = token
-        cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        try:
-            os.chmod(cfg_path, 0o600)
-        except OSError:
-            pass
+        _atomic_write(
+            cfg_path,
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            mode=cfg_mode,
+        )
     except Exception as e:
         print(f"写入失败：{e}", file=sys.stderr)
         return 1
 
-    if backup.exists():
+    if backup is not None:
         print(f"旧文件备份：{backup}")
     print("完成：.env 和 config.json 已更新（没有输出密钥值）")
     return 0

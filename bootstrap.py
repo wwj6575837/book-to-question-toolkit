@@ -78,7 +78,7 @@ def fetch_github(repo: str, ref: str, rel: str) -> bytes:
     raise RuntimeError(f"下载失败 {rel}: {last}") from last
 
 
-def atomic_write(target: Path, data: bytes) -> None:
+def atomic_write(target: Path, data: bytes, mode: int | None = None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".b2q-", suffix=".tmp")
     try:
@@ -86,7 +86,7 @@ def atomic_write(target: Path, data: bytes) -> None:
             fh.write(data)
         os.replace(tmp, target)
         try:
-            os.chmod(target, 0o644)
+            os.chmod(target, mode if mode is not None else 0o644)
         except OSError:
             pass
     finally:
@@ -95,6 +95,32 @@ def atomic_write(target: Path, data: bytes) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+GITIGNORE_LINES = [
+    ".env", "config.json", ".venv/", "exports/", "拆书/",
+    "补题/详细版/", "补题/拆分后/", "补题/题目/", "补题/配置/",
+    ".book-to-question-backup/",
+]
+
+
+def merge_gitignore(target: Path, update: bool) -> list[str]:
+    path = target / ".gitignore"
+    existing = set()
+    if path.exists():
+        existing = {
+            x.strip() for x in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        }
+    missing = [x for x in GITIGNORE_LINES if x not in existing]
+    if missing and update:
+        prefix = "" if not path.exists() or not path.read_text(
+            encoding="utf-8", errors="ignore"
+        ).endswith("\n") else "\n"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(prefix + "# >>> book-to-question >>>\n")
+            fh.write("\n".join(missing) + "\n")
+            fh.write("# <<< book-to-question <<<\n")
+    return missing
 
 
 def backup_file(target: Path, rel: str, backup_root: Path) -> None:
@@ -127,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-overwrite", action="store_true", help="只补缺失，不覆盖内容不同的受管文件")
     p.add_argument("--no-install", action="store_true", help="不执行 pip install")
     p.add_argument("--no-venv", action="store_true", help="不创建 .venv")
+    p.add_argument("--create", action="store_true", help="目标目录不存在时允许新建")
+    p.add_argument("--install-deps", action="store_true",
+                   help="安装到现有项目时也执行 pip install（默认不做）")
+    p.add_argument("--venv", help="指定独立的 venv 路径（默认 <目标>/.venv）")
+    p.add_argument("--update-gitignore", action="store_true",
+                   help="把密钥/产物忽略规则追加到目标 .gitignore")
+    p.add_argument("--skip-skill-files", action="store_true",
+                   help="不处理 .claude/skills/ 下的文件（主仓库模式）")
     args = p.parse_args(argv)
 
     if sys.version_info < (3, 12):
@@ -134,9 +168,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     target = Path(args.install_into).expanduser().resolve() if args.install_into else ROOT
+    is_self = target == ROOT
     if not target.exists():
         if args.check:
             print(f"目标目录不存在：{target}", file=sys.stderr)
+            return 2
+        if args.install_into and not args.create:
+            print(f"目标目录不存在：{target}\n确认要新建请加 --create。", file=sys.stderr)
             return 2
         target.mkdir(parents=True, exist_ok=True)
 
@@ -152,20 +190,25 @@ def main(argv: list[str] | None = None) -> int:
     overwritten: list[str] = []
     unavailable: list[str] = []
     errors: list[str] = []
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y%m%d-%H%M%S-%f")
     backup_root = target / ".book-to-question-backup" / stamp
 
     for rel in files:
         dst = target / rel
-        # 主仓库没有 skill 文件；该类文件只能由目标项目自带
-        if args.from_github and rel.startswith(".claude/skills/") and "mineru-toolkit" in args.source_repo:
+        if args.skip_skill_files and rel.startswith(".claude/skills/"):
             if dst.exists():
                 same.append(rel)
             else:
                 unavailable.append(rel)
             continue
         try:
-            data = fetch_github(args.source_repo, args.ref, rel) if args.from_github else (ROOT / rel).read_bytes()
+            if args.from_github:
+                data = fetch_github(args.source_repo, args.ref, rel)
+                mode = 0o755 if rel.endswith(".py") else 0o644
+            else:
+                src = ROOT / rel
+                data = src.read_bytes()
+                mode = src.stat().st_mode & 0o777
         except Exception as e:
             errors.append(f"{rel}: {e}")
             continue
@@ -173,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         if not dst.exists():
             missing.append(rel)
             if not args.check:
-                atomic_write(dst, data)
+                atomic_write(dst, data, mode)
             continue
 
         if dst.read_bytes() == data:
@@ -184,17 +227,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.check or args.no_overwrite:
             continue
         backup_file(dst, rel, backup_root)
-        atomic_write(dst, data)
+        atomic_write(dst, data, mode)
         overwritten.append(rel)
 
-    if not args.check and not args.no_venv:
-        py = venv_python(target)
+    venv_dir = Path(args.venv).expanduser().resolve() if args.venv else target / ".venv"
+    py = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    want_deps = is_self or args.install_deps
+    if not args.check and not args.no_venv and want_deps:
         if not py.exists():
-            print(f"\n创建 venv：{target / '.venv'}")
-            rc = subprocess.call([sys.executable, "-m", "venv", str(target / ".venv")])
+            print(f"\n创建 venv：{venv_dir}")
+            rc = subprocess.call([sys.executable, "-m", "venv", str(venv_dir)])
             if rc != 0:
                 errors.append("创建 .venv 失败")
-        py = venv_python(target)
         req = ROOT / "requirements.txt"
         if args.no_install:
             print(f"\n（--no-install）安装命令：{py} -m pip install -r {req}")
@@ -205,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
             rc = subprocess.call([str(py), "-m", "pip", "install", "-r", str(req)])
             if rc != 0:
                 errors.append("pip install 失败")
+    elif args.install_into and not is_self:
+        print("\n（安装到现有项目）默认不创建 venv、不装依赖；需要时加 --install-deps 或 --venv。")
 
     # 配置模板：用户文件只在缺失时生成
     if not args.check:

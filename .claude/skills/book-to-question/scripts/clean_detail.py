@@ -26,12 +26,37 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mdscan import iter_headings, read_text_any, split_at_headings
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 _HEAD = re.compile(r"^(#{1,6})\s*(.*)$")
-_CHAPTER = re.compile(r"^第\s*(\d+)\s*章")
+_CHAPTER = re.compile(
+    r"^第\s*([〇一二三四五六七八九十百\d]+)\s*(?:章|单元|讲|编|课|模块|项目|部分|篇)"
+    r"|^(?:单元|项目|模块)\s*([〇一二三四五六七八九十百\d]+)"
+)
 _PART = re.compile(r"第\s*(\d+)\s*节")
 _DASH = re.compile(r"[‐‑‒–—―−]")
 _NUM = re.compile(r"^(\d+(?:\.\d+)+)\s*(.*)$")
+_CN = {"〇": 0, "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+       "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _to_int(s: str) -> int:
+    if s.isdigit():
+        return int(s)
+    total = section = 0
+    for ch in s:
+        if ch in _CN and ch != "十":
+            section = _CN[ch]
+        elif ch == "十":
+            total += (section or 1) * 10
+            section = 0
+        elif ch == "百":
+            total += (section or 1) * 100
+            section = 0
+        else:
+            return 9999
+    return total + section
 
 
 def clean_text(text: str) -> str:
@@ -66,7 +91,7 @@ def key_of(title: str) -> tuple[int, int] | None:
     m = _CHAPTER.match(title)
     if not m:
         return None
-    n = int(m.group(1))
+    n = _to_int(m.group(1) or m.group(2))
     p = _PART.search(title)
     return (n, int(p.group(1)) if p else 0)
 
@@ -88,19 +113,9 @@ def expected_index(title: str, expected: list[str]) -> int | None:
     return same[-1][0]
 
 
-def split_blocks(lines: list[str]) -> list[list[str]]:
-    blocks: list[list[str]] = []
-    cur: list[str] = []
-    for line in lines:
-        if line.startswith("## "):
-            if cur:
-                blocks.append(cur)
-            cur = [line]
-        else:
-            cur.append(line)
-    if cur:
-        blocks.append(cur)
-    return blocks
+def split_blocks(lines: list[str]) -> tuple[list[str], list[list[str]]]:
+    pre, blocks = split_at_headings(lines, 2)
+    return pre, [block for _title, block in blocks]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--book-json", help="书目录下的 book.json（提供 16 章期望标题）")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--allow-unmatched", action="store_true",
+                   help="允许把未匹配块追加到末尾/缺少期望章节时继续")
     args = p.parse_args(argv)
 
     path = Path(args.file).expanduser().resolve()
@@ -116,8 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"文件不存在：{path}", file=sys.stderr)
         return 2
     expected = load_expected(Path(args.book_json) if args.book_json else None)
-    text = path.read_text(encoding="utf-8-sig")
-    blocks = split_blocks(text.splitlines())
+    text = read_text_any(path)
+    preamble, blocks = split_blocks(text.splitlines())
 
     chosen: dict[int, list[str]] = {}
     sections: dict[int, list[str]] = {}
@@ -160,11 +177,23 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 unmatched.append(block)
 
+    missing = [expected[i] for i in range(len(expected)) if i not in chosen] if expected else []
+    if missing:
+        print(f"缺少期望章节 {len(missing)} 个：{missing[:10]}", file=sys.stderr)
+    if unmatched:
+        print(f"未匹配块 {len(unmatched)} 个：", file=sys.stderr)
+        for block in unmatched[:10]:
+            print(f"  - {block[0][:80]}", file=sys.stderr)
+    if (missing or unmatched) and not args.allow_unmatched:
+        print("默认不写入；确认后可加 --allow-unmatched。", file=sys.stderr)
+        return 3
+
     out: list[str] = []
+    if any(x.strip() for x in preamble):
+        out.extend(preamble)
     order = list(range(len(expected))) if expected else []
     for i in order:
         if i not in chosen:
-            print(f"⚠ 缺少期望章节：{expected[i]}", file=sys.stderr)
             continue
         block = chosen[i].copy()
         block[0] = f"## {expected[i]}"

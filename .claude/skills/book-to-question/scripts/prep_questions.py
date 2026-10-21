@@ -23,6 +23,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mdscan import iter_headings, read_text_any
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DETAIL_DIR = REPO_ROOT / "exports" / "multi_agent" / "final" / "书籍库"
 ORGANIZED_ROOT = REPO_ROOT / "exports" / "Organized_Books"
@@ -70,7 +72,15 @@ def chapter_no(label: str) -> tuple[int, int]:
 
 def demote_headings(text: str) -> str:
     out = []
+    in_fence = False
     for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
         m = _HEAD.match(line)
         if m:
             level = min(6, len(m.group(1)) + 2)
@@ -97,13 +107,18 @@ def find_detail(book_id: str) -> list[Path]:
     return [p for p in hits if p.is_file()]
 
 
-def find_fallback(book_id: str) -> list[Path]:
-    dirs = sorted(ORGANIZED_ROOT.glob(f"{book_id}-*_organized"))
-    dirs = [d for d in dirs if d.is_dir()]
+def find_fallback(book_id: str, explicit: str | None = None) -> list[Path]:
+    if explicit:
+        dirs = [Path(explicit).expanduser().resolve()]
+    else:
+        dirs = sorted(ORGANIZED_ROOT.glob(f"{book_id}-*_organized"))
+        dirs = [d for d in dirs if d.is_dir()]
     if not dirs:
         return []
-    best = max(dirs, key=lambda d: len(list(d.glob("*_full.md"))))
-    files = list(best.glob("*_full.md"))
+    if len(dirs) > 1:
+        names = "、".join(d.name for d in dirs)
+        raise ValueError(f"匹配到多个 Organized_Books 目录，请用 --organized-dir 指定：{names}")
+    files = list(dirs[0].glob("*_full.md"))
     files.sort(key=lambda p: chapter_no(label_from_filename(p.stem, book_id)))
     return files
 
@@ -112,7 +127,7 @@ def build_from_fallback(files: list[Path], book_id: str) -> tuple[str, list[str]
     parts, labels = [], []
     for p in files:
         label = label_from_filename(p.stem, book_id)
-        body = p.read_text(encoding="utf-8-sig")
+        body = read_text_any(p)
         parts.append(f"## {label}\n\n{demote_headings(body).strip()}\n")
         labels.append(label)
     return "\n".join(parts), labels
@@ -126,11 +141,19 @@ def load_question_config(path: Path) -> dict | None:
     if not isinstance(q, dict) or "counts" not in q:
         return None
     counts = q["counts"]
+    if not isinstance(counts, dict):
+        raise ValueError("question.counts 不是对象")
     required = {"单选题", "多选题", "判断题", "组合题", "填空题", "简答题"}
     missing = required - set(counts)
     if missing:
         raise ValueError(f"question.counts 缺少题型：{sorted(missing)}")
-    total = sum(sum(v.values()) for v in counts.values() if isinstance(v, dict))
+    for name, row in counts.items():
+        if not isinstance(row, dict):
+            raise ValueError(f"counts.{name} 不是对象")
+        for d, v in row.items():
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                raise ValueError(f"counts.{name}.{d} 必须是非负整数")
+    total = sum(sum(v.values()) for v in counts.values())
     batch = q.get("batch")
     if batch and total > int(batch):
         raise ValueError(f"counts 合计 {total} 超过本批题量 {batch}")
@@ -138,7 +161,7 @@ def load_question_config(path: Path) -> dict | None:
         "counts": counts,
         "ratio": q.get("ratio", ""),
         "special": q.get("special", ""),
-        "overwrite": False,
+        "overwrite": bool(q.get("overwrite", False)),
         "concurrency": int(q.get("concurrency", 3)),
         "rounds": max(1, int(q.get("rounds", 1))),
     }
@@ -149,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--id", required=True)
     p.add_argument("--book", required=True)
     p.add_argument("--book-json", help="书目录下的 book.json，用其中的 question 生成命题配置")
+    p.add_argument("--organized-dir", help="_full.md 回退时显式指定 Organized_Books 目录")
     p.add_argument("--config-out", help="命题配置输出路径（默认 补题/配置/<id><书名>.json）")
     p.add_argument("--apply", action="store_true", help="默认 dry-run；加此参数才写文件")
     p.add_argument("--dry-run", action="store_true", help="显式 dry-run（默认行为）")
@@ -165,7 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     if safe_book != book:
         print(f"书名含 Windows 非法字符，写盘时替换为全角：{book} -> {safe_book}")
     target = TARGET_DIR / f"{book_id}{safe_book}.md"
-    others = [p for p in TARGET_DIR.glob(f"{book_id}*.md") if p.resolve() != target.resolve()]
+    others = [
+        p for p in TARGET_DIR.glob(f"{book_id}*.md")
+        if p.resolve() != target.resolve()
+        and re.match(rf"^{re.escape(book_id)}(?:\D|$)", p.stem)
+    ]
     if others:
         print(
             f"补题/详细版/ 下已有同 id 的其他文件，先消歧（find_source_md 会因多命中报错）：\n"
@@ -175,15 +203,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     detail = find_detail(book_id)
-    fallback = find_fallback(book_id) if not detail else []
+    try:
+        fallback = find_fallback(book_id, args.organized_dir) if not detail else []
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if len(detail) > 1:
         print("匹配到多个详细版，先消歧：\n" + "\n".join(f"  {p.name}" for p in detail), file=sys.stderr)
         return 2
 
     if detail:
         source = detail[0]
-        text = source.read_text(encoding="utf-8-sig")
-        labels = [ln[3:].strip() for ln in text.splitlines() if ln.startswith("## ")]
+        text = read_text_any(source)
+        labels = [txt for _i, lv, txt in iter_headings(text.splitlines(), 2)]
         mode = f"详细版：{source.name}"
     elif fallback:
         text, labels = build_from_fallback(fallback, book_id)
@@ -209,7 +241,16 @@ def main(argv: list[str] | None = None) -> int:
         print("没有解析到任何 '## ' 章节标题，中止。", file=sys.stderr)
         return 2
 
-    cfg = load_question_config(Path(args.book_json)) if args.book_json else None
+    cfg = None
+    if args.book_json:
+        try:
+            cfg = load_question_config(Path(args.book_json))
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            print(f"读取 book.json 配置失败：{e}", file=sys.stderr)
+            return 2
+        if cfg is None:
+            print(f"{args.book_json} 里没有有效的 question.counts", file=sys.stderr)
+            return 2
 
     if not args.apply:
         if cfg:

@@ -37,10 +37,20 @@ _PAGE_NUM = [
 ]
 
 
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def sanitize_filename(name: str) -> str:
-    """Windows 安全文件名：去非法字符、压缩空白、去尾部点和空格。"""
+    """Windows 安全文件名：去非法字符、压缩空白、截断过长、避开保留名。"""
     name = _ILLEGAL.sub("", name)
     name = re.sub(r"\s+", " ", name).strip().rstrip(". ")
+    name = name[:100]
+    if name.split(".")[0].upper() in _RESERVED:
+        name = "_" + name
     return name or "未命名"
 
 
@@ -63,6 +73,13 @@ def parse_titles(path: Path) -> tuple[list[str], list[tuple[int, int]]]:
         ranges.append((int(m.group(1)), int(m.group(2))))
     if len(titles) != len(ranges):
         raise ValueError(f"标题数({len(titles)})与页码范围数({len(ranges)})不一致")
+    seen: dict[str, int] = {}
+    for i, title in enumerate(titles, 1):
+        if not title.strip():
+            raise ValueError(f"第 {i} 个标题为空")
+        if title in seen:
+            raise ValueError(f"重复标题：{title}（第 {seen[title]} 行与第 {i} 行）")
+        seen[title] = i
     return titles, ranges
 
 
@@ -72,6 +89,7 @@ def validate_plan(
     max_pages: int,
     *,
     allow_oversize: bool = False,
+    titles: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """返回 (errors, warnings)。重叠/越界是 error，内部空隙和超页是 warning/error。"""
     errors: list[str] = []
@@ -87,18 +105,31 @@ def validate_plan(
         if size > max_pages and not allow_oversize:
             errors.append(f"第 {i} 段 {start}-{end}：{size} 页，超过 {max_pages} 页限制")
 
+    if titles is not None:
+        seen: dict[str, int] = {}
+        for i, title in enumerate(titles, 1):
+            fn = sanitize_filename(title)
+            if fn in seen:
+                errors.append(f"第 {i} 个标题清洗后与第 {seen[fn]} 个重名：{fn}")
+            else:
+                seen[fn] = i
+
     ordered = sorted((s, e, i) for i, (s, e) in enumerate(ranges, 1))
-    for prev, cur in zip(ordered, ordered[1:]):
-        ps, pe, pi = prev
-        cs, ce, ci = cur
-        if cs <= pe:
+    max_end = 0
+    max_i = None
+    for start, end, i in ordered:
+        if start <= max_end and max_i is not None:
             errors.append(
-                f"第 {pi} 段 {ps}-{pe} 与第 {ci} 段 {cs}-{ce} 重叠"
+                f"第 {i} 段 {start}-{end} 与第 {max_i} 段（结束于 {max_end}）重叠"
             )
-        elif cs > pe + 1:
+        elif max_end and start > max_end + 1:
             warnings.append(
-                f"第 {pi} 段 {ps}-{pe} 与第 {ci} 段 {cs}-{ce} 之间有 {cs - pe - 1} 页空隙"
+                f"第 {max_i} 段结束于 {max_end}，下一段从 {start} 开始，"
+                f"之间有 {start - max_end - 1} 页空隙"
             )
+        if end > max_end:
+            max_end = end
+            max_i = i
 
     if ordered:
         first_start = ordered[0][0]
@@ -115,7 +146,7 @@ def _page_number_candidates(text: str, total_pages: int) -> list[int]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return []
-    probe = lines[-3:] + lines[:2]
+    probe = lines[-2:] + lines[:1]
     out: list[int] = []
     for line in probe:
         for rx in _PAGE_NUM:
@@ -169,14 +200,24 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     }
 
     if mapping:
-        printed = [p for _, p in mapping]
+        if args.offset is not None:
+            top_offset, confidence = int(args.offset), 1.0
+            print(f"使用指定偏移量：{top_offset}")
+        else:
+            top_offset, top_count = offsets.most_common(1)[0]
+            confidence = top_count / len(mapping)
+        # 只用与主偏移量一致的页做连续性检查，避免目录/正文数字污染
+        filtered = [(p, n) for p, n in mapping if p - n == top_offset]
+        check = filtered or mapping
+        printed = [p for _, p in check]
         dup = sorted(n for n, c in Counter(printed).items() if c > 1)
         expected = list(range(min(printed), max(printed) + 1))
         missing = sorted(set(expected) - set(printed))
         disordered = [
-            (a, b) for a, b in zip(mapping, mapping[1:]) if b[1] < a[1]
+            (a, b) for a, b in zip(check, check[1:]) if b[1] < a[1]
         ]
         report.update({
+            "pages_matching_offset": len(filtered),
             "printed_min": min(printed),
             "printed_max": max(printed),
             "duplicate_printed_numbers": dup,
@@ -193,15 +234,14 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         if not (dup or missing or disordered):
             print("标码连续性：正常")
 
-        top_offset, top_count = offsets.most_common(1)[0]
-        confidence = top_count / len(mapping)
-        report["offset_suggestion"] = top_offset if confidence >= 0.6 and len(mapping) >= 5 else None
+        report["offset_suggestion"] = top_offset if args.offset is not None or (confidence >= 0.6 and len(mapping) >= 5) else None
         report["offset_confidence"] = round(confidence, 3)
         if report["offset_suggestion"] is None:
             print("偏移量：样本不足或一致率低，未给出建议值，请人工确认。")
         else:
             print(
-                f"偏移量建议：{top_offset}（一致率 {confidence:.0%}）"
+                f"偏移量{'指定' if args.offset is not None else '建议'}：{top_offset}"
+                f"（一致率 {confidence:.0%}）"
                 f"；书上第 1 页 ≈ PDF 第 {top_offset + 1} 页"
             )
     else:
@@ -265,7 +305,8 @@ def _load_plan(args: argparse.Namespace):
     total = doc.page_count
     doc.close()
     errors, warnings = validate_plan(
-        ranges, total, args.max_pages, allow_oversize=args.allow_oversize
+        ranges, total, args.max_pages,
+        allow_oversize=args.allow_oversize, titles=titles,
     )
     return pdf, total, titles, ranges, errors, warnings
 
@@ -323,16 +364,31 @@ def cmd_split(args: argparse.Namespace) -> int:
             continue
         dest = fitz.open()
         dest.insert_pdf(src, from_page=s - 1, to_page=e - 1)
+        expected_n = e - s + 1
         dest.save(out)
         dest.close()
-        made.append((out.name, e - s + 1))
+        try:
+            with fitz.open(out) as check:
+                actual = check.page_count
+        except (fitz.FileDataError, OSError) as exc:
+            actual = -1
+            print(f"  无法重新打开 {out.name}：{exc}", file=sys.stderr)
+        made.append((out.name, actual, expected_n))
     src.close()
 
     print(f"\n已生成 {len(made)} 个 PDF -> {outdir}")
-    for name, n in made:
-        print(f"  {name} ({n}页)")
+    bad = []
+    for name, actual, expected_n in made:
+        print(f"  {name} ({actual}页)")
+        if actual != expected_n:
+            bad.append(f"{name}: 实际 {actual} 页，应为 {expected_n} 页")
     if skipped:
         print(f"跳过已存在 {len(skipped)} 个（加 --force 覆盖）")
+    if bad:
+        print("\n输出页数复核失败：", file=sys.stderr)
+        for b in bad:
+            print(f"  ✗ {b}", file=sys.stderr)
+        return 1
 
     book_path = outdir / "book.json"
     if book_path.exists():
@@ -359,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     pi = sub.add_parser("inspect", help="页数、标码连续性、候选偏移量")
     pi.add_argument("--pdf", required=True)
     pi.add_argument("--out-json", help="更新 book.json")
+    pi.add_argument("--offset", type=int, help="直接指定偏移量，跳过页脚启发式")
     pi.set_defaults(func=cmd_inspect)
 
     pr = sub.add_parser("render", help="把指定页导出 PNG，供扫描件人工识别")

@@ -20,7 +20,6 @@ import argparse
 import importlib.util
 import json
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -41,7 +40,14 @@ FILES = [
 # 阶段 2/3 依赖，缺了只提示、不复制
 PIPELINE_FILES = [
     ("run_converter.py", "MinerU 转换入口"),
+    ("mineru_batch_converter.py", "MinerU 批量转换"),
+    ("qiniu_markdown_images.py", "七牛图片上传"),
     ("advanced_markdown_reorganizer.py", "Markdown 组织"),
+    ("project_dotenv.py", ".env 加载"),
+    ("multi_agent/utils.py", "流水线工具"),
+    ("multi_agent/agent_runner.py", "LLM 调用"),
+    ("multi_agent/ensemble_merge.py", "融合"),
+    ("multi_agent/prompts", "Agent 提示词"),
     ("multi_agent/chapter_pipeline.py", "详细版流水线"),
     ("md/知识点总结提示词V5.1.md", "详细版提示词"),
     ("multi_agent/chapter_pipeline1.py", "精简版流水线"),
@@ -54,7 +60,6 @@ PACKAGES = [
     ("openai", "OpenAI 兼容客户端", True),
     ("requests", "语雀/MinerU 请求", True),
     ("qiniu", "七牛图片上传", False),
-    ("openpyxl", "题目数分配（可选）", False),
 ]
 
 ENV_KEYS = [
@@ -175,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 5) 密钥
     print("\n密钥/配置项")
-    env_files = [REPO_ROOT / ".env", REPO_ROOT / "yuque_batch" / ".env"]
+    env_files = [REPO_ROOT / ".env"]
     for key, desc in ENV_KEYS:
         val = env_value(key, env_files)
         status(bool(val), f"{key} - {desc}" + ("" if val else "（未设置）"))
@@ -210,14 +215,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 7) 分享前检查
     print("\n分享前检查")
-    yq = SKILL_DIR / "scripts" / "yuque_upload.py"
-    if yq.exists():
-        m = re.search(r'DEFAULT_YUQUE_TOKEN\s*=\s*"([^"]*)"', yq.read_text(encoding="utf-8"))
-        if m and m.group(1).strip():
-            print("  ⚠ yuque_upload.py 内含默认语雀 token；对外分享前请删除 DEFAULT_YUQUE_TOKEN")
-        else:
-            print("  ✓ yuque_upload.py 没有内置 token")
-    print("  ⚠ .env / config.json / yuque_batch/.env 不要随仓库或压缩包发给别人")
+    print("  ⚠ .env / config.json / .book-to-question-backup/ 不要随仓库或压缩包发给别人")
 
     if errors == 0 and warnings == 0:
         print("\n结果：全部就绪")

@@ -4,7 +4,8 @@
 
 用法：
     python validate_questions.py --id 1957 --book "逻辑思维训练教程" \
-        --config "补题\\配置\\1957逻辑思维训练教程.json"
+        --config "补题\\配置\\1957逻辑思维训练教程.json" \
+        --book-json "D:\\...\\book.json"
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import re
 import sys
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -21,10 +23,16 @@ TYPES = {"choice", "multiple", "judge", "fill", "short", "group"}
 _DASH = re.compile(r"[‐‑‒–—―−]")
 _FORBIDDEN = ("教材", "课本", "根据所学", "如上图", "如下图", "见图", "见下表", "见上图")
 _BARE_HASH = re.compile(r"^\s*#(?!\\)", re.M)
+_DUP_STRIP = re.compile(r"[\s，。！？、；：“”‘’（）()【】\[\]《》<>·.,!?;:'\"-]+")
+SKIP_CHAPTERS = {"00_文件头"}
 
 
 def norm(s: str) -> str:
     return _DASH.sub("-", s).strip()
+
+
+def norm_title(s: str) -> str:
+    return _DUP_STRIP.sub("", str(s or ""))
 
 
 def expected_counts(config_path: Path | None) -> int | None:
@@ -32,11 +40,12 @@ def expected_counts(config_path: Path | None) -> int | None:
         return None
     try:
         cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
-        counts = cfg.get("counts", cfg.get("question", {}).get("counts", {}))
+        q = cfg.get("question", {}) if isinstance(cfg.get("question"), dict) else {}
+        counts = cfg.get("counts", q.get("counts", {}))
         per_round = sum(sum(v.values()) for v in counts.values() if isinstance(v, dict))
-        rounds = max(1, int(cfg.get("rounds", 1)))
+        rounds = max(1, int(cfg.get("rounds", q.get("rounds", 1))))
         return per_round * rounds or None
-    except (OSError, json.JSONDecodeError, AttributeError, ValueError):
+    except (OSError, json.JSONDecodeError, AttributeError, ValueError, TypeError):
         return None
 
 
@@ -93,10 +102,14 @@ def check_one(q, idx: int, book_id: int, book: str, tag: str, errs: list[str], w
             errs.append(f"{where} {typ} answer 为空")
         elif typ == "choice" and not re.fullmatch(r"[A-H]", answer.strip()):
             warns.append(f"{where} choice answer 不是单个字母：{answer!r}")
-        elif typ == "multiple":
-            if not re.fullmatch(r"[A-H]+", answer.strip()):
-                warns.append(f"{where} multiple answer 含非字母：{answer!r}")
-            elif answer != "".join(sorted(set(answer))):
+        elif typ == "multiple" and not re.fullmatch(r"[A-H]+", answer.strip()):
+            warns.append(f"{where} multiple answer 含非字母：{answer!r}")
+        if isinstance(options, list) and isinstance(answer, str) and answer.strip():
+            limit = 65 + len(options) - 1  # A + n-1
+            bad = [c for c in answer.strip() if not (65 <= ord(c) <= limit)]
+            if bad:
+                errs.append(f"{where} answer {answer!r} 超出 options 范围（{len(options)} 项）")
+            elif typ == "multiple" and answer != "".join(sorted(set(answer))):
                 warns.append(f"{where} multiple answer 未按升序去重：{answer!r}")
     elif typ == "judge":
         if answer not in ("是", "否"):
@@ -108,9 +121,69 @@ def check_one(q, idx: int, book_id: int, book: str, tag: str, errs: list[str], w
         subs = q.get("subs")
         if not isinstance(subs, list) or not (2 <= len(subs) <= 5):
             errs.append(f"{where} group subs 应为 2–5 个")
-        elif len(title) < 150:
-            warns.append(f"{where} group 根题干不足 150 字（{len(title)}）")
+        else:
+            if len(title) < 150:
+                warns.append(f"{where} group 根题干不足 150 字（{len(title)}）")
+            for si, sub in enumerate(subs, 1):
+                if not isinstance(sub, dict):
+                    errs.append(f"{where} group 子题 {si} 不是对象")
+                    continue
+                if not str(sub.get("title") or "").strip():
+                    errs.append(f"{where} group 子题 {si} title 为空")
+                if "tags" in sub or "difficulty" in sub:
+                    errs.append(f"{where} group 子题 {si} 不应带 tags/difficulty")
+                st = sub.get("type")
+                if st in {"choice", "multiple"}:
+                    if not isinstance(sub.get("options"), list) or len(sub["options"]) < 2:
+                        errs.append(f"{where} group 子题 {si} options 少于 2 项")
+                    if not str(sub.get("answer") or "").strip():
+                        errs.append(f"{where} group 子题 {si} answer 为空")
+                elif st == "judge":
+                    if sub.get("answer") not in ("是", "否"):
+                        errs.append(f"{where} group 子题 {si} judge answer 应为 是/否")
     return typ
+
+
+def cross_chapter_dups(records: list[tuple[str, str]], errs: list[str], warns: list[str]) -> None:
+    """records = [(chapter_stem, title)]。跨章完全相同记错误，≥0.90 记警告。"""
+    exact: dict[str, str] = {}
+    buckets: dict[str, list[tuple[str, str, str]]] = {}
+    reported = 0
+    for chapter, title in records:
+        n = norm_title(title)
+        if not n:
+            continue
+        prev = exact.get(n)
+        if prev is not None and prev != chapter:
+            errs.append(f"跨章重复题：{prev} 与 {chapter} 题干完全相同：{title[:40]}")
+        else:
+            exact.setdefault(n, chapter)
+        for n2, ch2, t2 in buckets.get(n[:10], []):
+            if ch2 == chapter or n2 == n:
+                continue
+            if abs(len(n) - len(n2)) > 30:
+                continue
+            if SequenceMatcher(None, n, n2).ratio() >= 0.90:
+                warns.append(
+                    f"跨章近似题：{ch2} / {chapter} 相似度≥0.90：{t2[:30]} ↔ {title[:30]}"
+                )
+                reported += 1
+                if reported >= 20:
+                    warns.append("… 跨章近似题超过 20 对，其余省略")
+                    return
+        buckets.setdefault(n[:10], []).append((n, chapter, title))
+
+
+def update_state(path: Path, ok: bool) -> None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        stages = data.setdefault("stages", {})
+        stages["questions"] = "done" if ok else "failed"
+        stages.setdefault("compact", "pending")
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"已更新：{path} stages.questions={stages['questions']}")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"⚠ 无法更新 book.json：{e}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,8 +192,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--book", required=True)
     p.add_argument("--config", help="命题配置 JSON（用于比对每章题数）")
     p.add_argument("--questions-dir", help="默认 补题/题目/<id><书名>")
+    p.add_argument("--split-dir", help="拆分后的章节 md 目录，用于检查漏章")
+    p.add_argument("--book-json", help="通过后写 stages.questions=done")
     args = p.parse_args(argv)
 
+    if not re.fullmatch(r"\d+", str(args.id).strip()):
+        print(f"id 必须是纯数字：{args.id}", file=sys.stderr)
+        return 2
     book_id = int(args.id)
     book = args.book.strip()
     qdir = Path(args.questions_dir) if args.questions_dir else REPO_ROOT / "补题" / "题目" / f"{book_id}{book}"
@@ -133,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     warns: list[str] = []
     type_dist: Counter = Counter()
     chapter_counts: dict[str, int] = {}
+    dedup_records: list[tuple[str, str]] = []
 
     skip = {"all.json", "config.json", "progress.json"}
     files = sorted(
@@ -158,10 +237,22 @@ def main(argv: list[str] | None = None) -> int:
             typ = check_one(q, i, book_id, book, tag, errs, warns)
             if typ:
                 type_dist[typ] += 1
+            if isinstance(q, dict):
+                dedup_records.append((path.stem, str(q.get("title") or "")))
         if expected is not None:
             dev = abs(len(obj) - expected) / expected
             if dev > 0.2:
                 warns.append(f"{path.name}: {len(obj)} 题，配置 {expected} 题，偏差 {dev:.0%}")
+
+    # 章节齐全性
+    split_dir = Path(args.split_dir) if args.split_dir else REPO_ROOT / "补题" / "拆分后" / f"{book_id}{book}"
+    if split_dir.is_dir():
+        expected_ch = {p.stem for p in split_dir.glob("*.md")} - SKIP_CHAPTERS
+        missing = sorted(expected_ch - set(chapter_counts))
+        if missing:
+            errs.append(f"缺少章节 JSON {len(missing)} 个：{missing[:10]}")
+
+    cross_chapter_dups(dedup_records, errs, warns)
 
     total = sum(chapter_counts.values())
     print(f"目录：{qdir}")
@@ -186,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, json.JSONDecodeError) as e:
             errs.append(f"all.json 不是合法 JSON：{e}")
     else:
-        warns.append("没有 all.json（脚本会在结束时生成）")
+        warns.append("没有 all.json（先运行命题官批量生成）")
 
     if warns:
         print(f"\n警告 {len(warns)} 条：")
@@ -200,7 +291,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ✗ {e}")
         if len(errs) > 100:
             print(f"  … 其余 {len(errs) - 100} 条省略")
+        if args.book_json:
+            update_state(Path(args.book_json), False)
         return 1
+    if args.book_json:
+        update_state(Path(args.book_json), True)
     print("\n通过。")
     return 0
 

@@ -26,8 +26,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mdscan import first_heading, read_text_any
+
 _HEAD = re.compile(r"^(#{1,6})\s*(.*)$")
-_UNIT = re.compile(r"^(?:教学)?单元\s*\d+|^第\s*\d+\s*章")
+_UNIT = re.compile(
+    r"^(?:教学)?单元\s*\d+"
+    r"|^第\s*\d+\s*(?:章|单元|讲|编|课|模块|项目|部分|篇)"
+    r"|^(?:项目|模块|单元)\s*[〇一二三四五六七八九十\d]+"
+)
 _SUB = re.compile(r"<sub>(.*?)</sub>", re.I)
 _NUM = re.compile(r"^(\d+(?:\.\d+)+)\s*(.*)$")
 
@@ -57,19 +63,22 @@ def chapter_title(path: Path, book_prefix: str) -> str:
     stem = path.stem
     if stem.startswith(book_prefix + "-"):
         stem = stem[len(book_prefix) + 1:]
+    else:
+        # 目录名不规范时，至少剥掉开头的 id
+        stem = re.sub(r"^\d+\s*[-‐‑‒–—―−]\s*", "", stem)
     stem = re.sub(r"_full(?:[-_]部分\d+)?$", "", stem)
     return stem
 
 
 def normalize(text: str, title: str) -> tuple[str, dict]:
     lines = text.splitlines()
-    head_idx = next((i for i, ln in enumerate(lines) if _HEAD.match(ln)), None)
+    first = first_heading(lines)
+    head_idx = first[0] if first else None
     stats = {"demoted": 0, "replaced_unit": False, "inserted_title": False}
     if head_idx is None:
         return f"## {title}\n\n{text}", stats
 
-    first = _HEAD.match(lines[head_idx])
-    first_text = first.group(2).strip() if first else ""
+    first_text = first[2]
     is_unit = bool(_UNIT.match(clean_heading(first_text)))
 
     out: list[str] = []
@@ -80,7 +89,15 @@ def normalize(text: str, title: str) -> tuple[str, dict]:
         out.append("")
 
     rest = lines[head_idx + 1:] if is_unit else lines[head_idx:]
+    in_fence = False
     for line in rest:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
         m = _HEAD.match(line)
         if not m:
             out.append(line)
@@ -112,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total_changed = 0
     for f in files:
-        text = f.read_text(encoding="utf-8-sig")
+        text = read_text_any(f)
         title = chapter_title(f, book_prefix)
         new, stats = normalize(text, title)
         h2 = len(re.findall(r"^## ", new, re.M))

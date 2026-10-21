@@ -186,8 +186,15 @@ def parse_chapters(text):
     """
     lines = text.splitlines(keepends=True)
 
-    # 定位每个二级标题行（须严格 "## "+ 非#开头）
-    heads = [i for i, ln in enumerate(lines) if ln.startswith("## ")]
+    # 定位每个二级标题行（须严格 "## "+ 非#开头），跳过 ``` 代码块
+    heads = []
+    in_code_block = False
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if not in_code_block and ln.startswith("## "):
+            heads.append(i)
 
     chapters = []
     if not heads:

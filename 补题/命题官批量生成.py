@@ -214,6 +214,14 @@ def _chapter_sort_key(stem):
 _DUP_STRIP = re.compile(r"[\s，。！？、；：“”‘’（）()【】\[\]《》<>·.,!?;:'\"-]+")
 
 
+def _valid_json_array(path) -> bool:
+    try:
+        obj = json.loads(_SPLIT.read_text_any(path))
+        return isinstance(obj, list)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def _dedupe_questions(items):
     """按题干相似度去重，保留先出现的；返回 (保留列表, 去掉数量)。"""
     kept, titles, dropped = [], [], 0
@@ -521,6 +529,8 @@ def _parse_args():
     p.add_argument("--concurrency", type=int, help="覆盖配置里的并发数")
     p.add_argument("--rounds", type=int, help="每章跑几轮（配置里有 rounds，这里可覆盖）")
     p.add_argument("--overwrite", action="store_true", help="覆盖已存在的章节 JSON")
+    p.add_argument("--resplit", action="store_true",
+                   help="按当前详细版覆盖重拆章节，并备份旧的 .分次 结果")
     return p.parse_args()
 
 
@@ -552,11 +562,14 @@ def main():
 
     # 拆分目录缺章节时自动先拆（复用脚本一）
     split_dir = DIR_SPLIT / stem
-    have = list(split_dir.glob("*.md")) if split_dir.exists() else []
+    def _chapters():
+        return [p for p in split_dir.glob("*.md") if p.stem != "00_文件头"]
+
+    have = _chapters() if split_dir.exists() else []
     if not have:
         print(f"拆分后/{stem}/ 为空，先按 ## 拆分…")
         _, files = _SPLIT.ensure_split(id_)
-        have = files or list(split_dir.glob("*.md"))
+        have = [p for p in (files or _chapters()) if p.stem != "00_文件头"]
     if not have:
         print("没有可命题的章节文件，退出。")
         return
@@ -589,6 +602,18 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     runsdir.mkdir(parents=True, exist_ok=True)
 
+    if args.resplit:
+        print(f"按 --resplit 重新拆分 {stem}…")
+        _SPLIT.ensure_split(id_, overwrite=True)
+        if runsdir.exists():
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            runsdir.rename(runsdir.with_name(f"{RUNS_DIRNAME}.bak-{stamp}"))
+        runsdir.mkdir(parents=True, exist_ok=True)
+        have = _chapters()
+        if not have:
+            print("重新拆分后没有章节文件，退出。")
+            return
+
     client = OpenAI(api_key=AI_API_KEY, base_url=AI_API_BASE)
 
     # 先按章节顺序挑出待生成的（每章 rounds 份，已存在的默认跳过）
@@ -596,9 +621,11 @@ def main():
     for f in sorted(have, key=lambda p: _chapter_sort_key(p.stem)):
         for run in range(1, rounds + 1):
             target = runsdir / f"{f.stem}.{run}.json"
-            if target.exists() and not cfg["overwrite"]:
-                print(f"skip  {f.name} 第{run}轮（已存在）")
+            if target.exists() and not cfg["overwrite"] and _valid_json_array(target):
+                print(f"skip  {f.name} 第{run}轮（已存在且合法）")
             else:
+                if target.exists() and not cfg["overwrite"]:
+                    print(f"redo  {f.name} 第{run}轮（已有文件不是合法 JSON）")
                 pending.append((f, run, target))
 
     fails = []
@@ -624,33 +651,36 @@ def main():
                     print(f"[{done}/{len(pending)}] FAIL {f.name} 第{run}轮 -> {err}")
 
     # 每章把各轮结果合并、按题干相似度去重
+    all_rounds_ok = True
     for f in sorted(have, key=lambda p: _chapter_sort_key(p.stem)):
         items = []
         for run in range(1, rounds + 1):
             p = runsdir / f"{f.stem}.{run}.json"
-            if not p.exists():
+            if not _valid_json_array(p):
+                all_rounds_ok = False
                 continue
-            try:
-                part = json.loads(_SPLIT.read_text_any(p))
-            except json.JSONDecodeError:
-                continue  # 失败留档，跳过这一轮
-            if isinstance(part, list):
-                items.extend(part)
+            part = json.loads(_SPLIT.read_text_any(p))
+            items.extend(part)
+        out_ch = outdir / f"{f.stem}.json"
         if items:
             items, dropped = _dedupe_questions(items)
-            (outdir / f"{f.stem}.json").write_text(
+            out_ch.write_text(
                 json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"合并 {f.stem}: {len(items)} 题（去重 {dropped}）")
+        else:
+            out_ch.unlink(missing_ok=True)
+            print(f"⚠ {f.stem}: 没有合法轮次结果，已移除旧 JSON")
 
-    # 汇总：扫描输出目录里所有章节 json 再合并，这样断点续跑（跳过的章节）也计入
+    # 汇总：只汇总本轮章节文件，避免把 config/progress/备份 JSON 混进来
+    have_stems = {f.stem for f in have}
     merged = []
     for p in sorted(outdir.glob("*.json"), key=lambda p: _chapter_sort_key(p.stem)):
-        if p.name == "all.json":
+        if p.name == "all.json" or p.stem not in have_stems:
             continue
         try:
             obj = json.loads(_SPLIT.read_text_any(p))
         except json.JSONDecodeError:
-            continue  # 失败章节存的是原文，不是合法 JSON，跳过
+            continue
         if isinstance(obj, list):
             merged.extend(obj)
     all_json = outdir / "all.json"
@@ -658,13 +688,21 @@ def main():
         all_json.write_text(json.dumps(merged, ensure_ascii=False, indent=2),
                             encoding="utf-8")
         print(f"\n汇总：{len(merged)} 道题 -> {all_json.name}")
+    else:
+        all_json.unlink(missing_ok=True)
+
     failed_txt = outdir / "_failed.txt"
-    if fails:
-        with failed_txt.open("a", encoding="utf-8") as fh:
-            fh.writelines(f"{line}\n" for line in fails)
-        print(f"失败 {len(fails)} 个章节，已记入：{failed_txt}")
+    if fails or not all_rounds_ok:
+        lines = set()
+        if failed_txt.exists():
+            lines.update(x for x in failed_txt.read_text(encoding="utf-8").splitlines() if x.strip())
+        lines.update(fails)
+        if not all_rounds_ok:
+            lines.add("存在无效/缺失的 .分次 结果")
+        failed_txt.write_text("\n".join(sorted(lines)) + "\n", encoding="utf-8")
+        print(f"失败/无效 {len(lines)} 条，已记入：{failed_txt}")
     elif failed_txt.exists():
-        failed_txt.unlink()  # 本轮全成功后清掉历史失败记录
+        failed_txt.unlink()
         print("全部成功，历史失败记录已清除。")
     print(f"输出目录：{outdir}")
 

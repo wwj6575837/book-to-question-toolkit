@@ -11,6 +11,7 @@
     ".claude/skills/book-to-question/scripts/clean_detail.py",
     ".claude/skills/book-to-question/scripts/compact_stage.py",
     ".claude/skills/book-to-question/scripts/markdown_stage.py",
+    ".claude/skills/book-to-question/scripts/mdscan.py",
     ".claude/skills/book-to-question/scripts/normalize_headings.py",
     ".claude/skills/book-to-question/scripts/pdf_tools.py",
     ".claude/skills/book-to-question/scripts/prep_questions.py",
