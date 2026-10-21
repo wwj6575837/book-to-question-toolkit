@@ -1,5 +1,7 @@
 # book-to-question-toolkit
 
+> 第一次使用、不熟悉代码？先看 [使用手册.md](使用手册.md)。
+
 拆书上题工具包：PDF 拆章 → 转 Markdown → 生成详细版 → 批量上题 →（可选）精简版。
 
 只包含这条链路需要的脚本、提示词和 Claude Code skill；不包含教材 PDF、导出产物和其他业务数据。
