@@ -25,6 +25,7 @@ _FORBIDDEN = ("教材", "课本", "根据所学", "如上图", "如下图", "见
 _BARE_HASH = re.compile(r"^\s*#(?!\\)", re.M)
 _DUP_STRIP = re.compile(r"[\s，。！？、；：“”‘’（）()【】\[\]《》<>·.,!?;:'\"-]+")
 SKIP_CHAPTERS = {"00_文件头"}
+DIFF_BANDS = (("简单", 0.2, 0.4), ("中等", 0.5, 0.7), ("困难", 0.8, 0.9))
 
 
 def norm(s: str) -> str:
@@ -144,6 +145,116 @@ def check_one(q, idx: int, book_id: int, book: str, tag: str, errs: list[str], w
     return typ
 
 
+def expected_diff_ratios(config_path: Path | None) -> dict[str, float] | None:
+    """从命题配置的 counts×rounds 算简单/中等/困难目标占比。"""
+    if not config_path:
+        return None
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        q = cfg.get("question", {}) if isinstance(cfg.get("question"), dict) else {}
+        counts = cfg.get("counts", q.get("counts", {}))
+        rounds = max(1, int(cfg.get("rounds", q.get("rounds", 1))))
+        tally = {name: 0.0 for name, _, _ in DIFF_BANDS}
+        for row in counts.values():
+            if not isinstance(row, dict):
+                continue
+            for name, _, _ in DIFF_BANDS:
+                value = row.get(name, 0)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    tally[name] += float(value) * rounds
+        total = sum(tally.values())
+        if not total:
+            return None
+        return {name: value / total for name, value in tally.items()}
+    except (OSError, json.JSONDecodeError, AttributeError, ValueError, TypeError):
+        return None
+
+
+def collect_difficulties(q: dict) -> list[float]:
+    out: list[float] = []
+
+    def take(item) -> None:
+        d = item.get("difficulty") if isinstance(item, dict) else None
+        if isinstance(d, (int, float)) and not isinstance(d, bool):
+            out.append(float(d))
+
+    take(q)
+    subs = q.get("subs")
+    if isinstance(subs, list):
+        for sub in subs:
+            take(sub)
+    return out
+
+
+def band_of(d: float) -> str | None:
+    for name, lo, hi in DIFF_BANDS:
+        if lo <= d <= hi:
+            return name
+    return None
+
+
+def band_counts(values: list[float]) -> dict[str, int]:
+    counts = {name: 0 for name, _, _ in DIFF_BANDS}
+    for value in values:
+        name = band_of(value)
+        if name:
+            counts[name] += 1
+    return counts
+
+
+def _band_text(values: list[float]) -> str:
+    n = len(values)
+    counts = band_counts(values)
+    return "，".join(f"{name}{counts[name]}({counts[name] / n:.0%})" for name, _, _ in DIFF_BANDS)
+
+
+def check_difficulty_distribution(
+    chapter_diffs: dict[str, list[float]],
+    all_diffs: list[float],
+    target: dict[str, float] | None,
+    errs: list[str],
+    warns: list[str],
+    strict: bool,
+) -> None:
+    """只报告难度分布，不修改任何题目的 difficulty。"""
+    def add(msg: str, hard: bool = False) -> None:
+        if hard and strict:
+            errs.append(msg)
+        else:
+            warns.append(msg)
+
+    if len(all_diffs) >= 100:
+        counts = band_counts(all_diffs)
+        n = len(all_diffs)
+        if target:
+            for name, ratio in target.items():
+                actual = counts[name] / n
+                diff = abs(actual - ratio)
+                if diff > 0.25:
+                    add(f"全书难度「{name}」占比 {actual:.0%}，目标 {ratio:.0%}，偏差 {diff:.0%}", hard=True)
+                elif diff > 0.15:
+                    add(f"全书难度「{name}」占比 {actual:.0%}，目标 {ratio:.0%}，偏差 {diff:.0%}")
+        else:
+            worst = max(counts.values()) / n
+            if worst > 0.70:
+                add(f"全书难度分布单一：{_band_text(all_diffs)}")
+
+    for chapter, values in chapter_diffs.items():
+        n = len(values)
+        if n < 20:
+            continue
+        counts = band_counts(values)
+        worst = max(counts.values()) / n
+        if worst > 0.70:
+            add(f"{chapter} 难度分布单一：{_band_text(values)}")
+        if target:
+            for name, ratio in target.items():
+                actual = counts[name] / n
+                diff = abs(actual - ratio)
+                if diff > 0.20:
+                    add(f"{chapter} 难度「{name}」占比 {actual:.0%}，目标 {ratio:.0%}，偏差 {diff:.0%}")
+
+
 def cross_chapter_dups(records: list[tuple[str, str]], errs: list[str], warns: list[str]) -> None:
     """records = [(chapter_stem, title)]。跨章完全相同记错误，≥0.90 记警告。"""
     exact: dict[str, str] = {}
@@ -194,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--questions-dir", help="默认 补题/题目/<id><书名>")
     p.add_argument("--split-dir", help="拆分后的章节 md 目录，用于检查漏章")
     p.add_argument("--book-json", help="通过后写 stages.questions=done")
+    p.add_argument("--strict-difficulty", action="store_true",
+                   help="把严重的难度分布偏差视为错误（默认只警告）")
     args = p.parse_args(argv)
 
     if not re.fullmatch(r"\d+", str(args.id).strip()):
@@ -207,10 +320,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     expected = expected_counts(Path(args.config)) if args.config else None
+    expected_ratio = expected_diff_ratios(Path(args.config)) if args.config else None
     errs: list[str] = []
     warns: list[str] = []
     type_dist: Counter = Counter()
     chapter_counts: dict[str, int] = {}
+    chapter_diffs: dict[str, list[float]] = {}
+    all_diffs: list[float] = []
     dedup_records: list[tuple[str, str]] = []
 
     skip = {"all.json", "config.json", "progress.json"}
@@ -239,6 +355,9 @@ def main(argv: list[str] | None = None) -> int:
                 type_dist[typ] += 1
             if isinstance(q, dict):
                 dedup_records.append((path.stem, str(q.get("title") or "")))
+                diffs = collect_difficulties(q)
+                chapter_diffs.setdefault(path.stem, []).extend(diffs)
+                all_diffs.extend(diffs)
         if expected is not None:
             dev = abs(len(obj) - expected) / expected
             if dev > 0.2:
@@ -253,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
             errs.append(f"缺少章节 JSON {len(missing)} 个：{missing[:10]}")
 
     cross_chapter_dups(dedup_records, errs, warns)
+    check_difficulty_distribution(
+        chapter_diffs, all_diffs, expected_ratio, errs, warns, args.strict_difficulty
+    )
 
     total = sum(chapter_counts.values())
     print(f"目录：{qdir}")
@@ -261,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {n:>3}  {name}")
     if type_dist:
         print("题型分布：" + "，".join(f"{k}={v}" for k, v in sorted(type_dist.items())))
+    if all_diffs:
+        print("难度分布：" + _band_text(all_diffs))
 
     failed = qdir / "_failed.txt"
     if failed.exists():

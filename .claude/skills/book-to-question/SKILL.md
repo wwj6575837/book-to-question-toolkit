@@ -255,6 +255,17 @@ cd /path/to/MinerU
 - 补齐顺序：先 `clean_detail.py`，再 `supplement_detail.py`；两个都先跑 dry-run 看清单。
 - 补齐来源优先看 `*.doubao_from_source.md`，其次 `*.deepseek_from_source.md`；两者都没有内容时才对照原书。
 
+**公式渲染检查（清理补齐之后必做）：**
+
+```powershell
+.venv\Scripts\python.exe .claude\skills\book-to-question\scripts\check_formulas.py `
+  --file "exports\multi_agent\final\书籍库\<id>-1 <书名>.md"
+```
+
+- ERROR（`$$` 未闭合、`$`/`\(`/`\[` 不配对、花括号或 `\begin/\end` 不平衡）必须先修，修好前不进入阶段 4。
+- WARN（行内 `$` 截断、`\tag` 残留、`$` 与 `\(` 混用、`$$` 与文字同行）列入人工抽查清单。
+- 只读检查，不自动改文件；`--json` 输出结构化结果，`--stats` 只看汇总。
+
 ## 阶段 4：上题（按轮次）
 
 1. 准备正文（详细版优先，缺失回退 `_full.md`）：
@@ -279,6 +290,7 @@ cd /path/to/MinerU
 ```
 
    - 轮数由配置里的 `rounds` 决定；也可用 `--rounds 2` 临时覆盖。
+   - 合并后默认自动均衡选项：单选答案在 A/B/C/D 间分配，多选组合打散，解析里的字母引用同步改写；无法安全改写的题保持原样并计数。先看效果加 `--audit`（不写盘），关闭用 `--no-balance`。
    - 不加 `--config` 时仍是原来的 tkinter 弹窗。
    - 输出：`补题\题目\<id><书名>\<章节>.json` + `all.json`。
 4. 校验：

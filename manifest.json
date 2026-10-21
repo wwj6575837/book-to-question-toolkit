@@ -8,6 +8,7 @@
     ".claude/skills/book-to-question/references/manual-steps.md",
     ".claude/skills/book-to-question/references/question-config.md",
     ".claude/skills/book-to-question/scripts/bootstrap.py",
+    ".claude/skills/book-to-question/scripts/check_formulas.py",
     ".claude/skills/book-to-question/scripts/clean_detail.py",
     ".claude/skills/book-to-question/scripts/compact_stage.py",
     ".claude/skills/book-to-question/scripts/markdown_stage.py",

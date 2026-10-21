@@ -48,6 +48,82 @@ def test_near_duplicate_across_chapters_warns():
     assert any("跨章近似题" in w for w in warnings)
 
 
+def test_expected_difficulty_ratios(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "counts": {"判断题": {"简单": 5, "中等": 3, "困难": 2}},
+                "rounds": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ratios = vq.expected_diff_ratios(cfg)
+    assert ratios == {"简单": 0.5, "中等": 0.3, "困难": 0.2}
+
+
+def test_difficulty_distribution_flags_single_band():
+    warnings, errors = [], []
+    values = [0.3] * 20
+    snapshot = list(values)
+
+    vq.check_difficulty_distribution({"第一章": values}, values, None, errors, warnings, False)
+
+    assert any("分布单一" in w for w in warnings)
+    assert not errors
+    assert values == snapshot
+
+
+def test_difficulty_target_deviation_strict():
+    warnings, errors = [], []
+    vq.check_difficulty_distribution(
+        {"第一章": [0.3] * 20},
+        [0.3] * 100,
+        {"简单": 0.5, "中等": 0.3, "困难": 0.2},
+        errors,
+        warnings,
+        True,
+    )
+    assert any("全书难度" in e for e in errors)
+
+
+def test_strict_difficulty_changes_exit_code(tmp_path):
+    qdir = tmp_path / "questions"
+    qdir.mkdir()
+    for name in ("第一章", "第二章"):
+        items = [question(f"{name}-第{i}题", f"测试书-{name}") for i in range(50)]
+        (qdir / f"{name}.json").write_text(
+            json.dumps(items, ensure_ascii=False), encoding="utf-8"
+        )
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "counts": {"判断题": {"简单": 50, "中等": 30, "困难": 20}},
+                "rounds": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = vq.main(
+        [
+            "--id",
+            "999",
+            "--book",
+            "测试书",
+            "--questions-dir",
+            str(qdir),
+            "--config",
+            str(cfg),
+            "--strict-difficulty",
+        ]
+    )
+
+    assert rc == 1
+
+
 def test_book_json_state_is_written(tmp_path):
     qdir = tmp_path / "questions"
     qdir.mkdir()

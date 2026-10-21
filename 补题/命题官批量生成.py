@@ -15,6 +15,8 @@
     .venv/bin/python 补题/命题官批量生成.py            # 交互：输入 id + 书籍名
 """
 
+import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -235,6 +237,251 @@ def _dedupe_questions(items):
         kept.append(q)
         titles.append(t)
     return kept, dropped
+
+
+# --------------------------------------------------------------------------
+# 选项均衡：只调整选项顺序与答案字母，不改题干、选项文字和解析结论
+# --------------------------------------------------------------------------
+_LETTERS = "ABCDEFGH"
+_EXPLICIT_OPTION = re.compile(r"(?:以上|上述).{0,4}(?:都|均)|[A-H]\s*(?:和|与|及)\s*[A-H]")
+_BARE_LETTER = re.compile(r"(?<![A-Za-z])[A-H](?![A-Za-z])")
+_PARSE_PATTERNS = [
+    (re.compile(r"(本题选|故选|正确答案(?:是|为)?|答案)(\s*)(\*{0,2})([A-H]+)(\3)"), "answer"),
+    (re.compile(r"(选项)(\s*)([A-H])"), "option"),
+    (re.compile(r"([A-H])(\s*)(项)"), "item"),
+    (re.compile(r"（([A-H])）"), "fullparen"),
+    (re.compile(r"\(([A-H])\)"), "halfparen"),
+    (re.compile(r"^(\s*[-*]?\s*)([A-H])(\s*[：:])", re.M), "list"),
+    (re.compile(r"(?<![\w])([A-H])(\s*[、,，])"), "pair"),
+    (re.compile(r"(?<![\w])([A-H])(\s*(?:错误|正确|符合|不符合|为|是|不选|当选))"), "judge"),
+]
+
+
+def _sub_parse(pattern, kind, text, mapping):
+    def repl(m):
+        if kind == "answer":
+            old = m.group(4)
+            if any(c not in mapping for c in old):
+                return m.group(0)
+            return f"{m.group(1)}{m.group(2)}{m.group(3)}" \
+                   f"{''.join(mapping[c] for c in old)}{m.group(3)}"
+        if kind == "option":
+            return f"{m.group(1)}{m.group(2)}{mapping.get(m.group(3), m.group(3))}"
+        if kind == "item":
+            return f"{mapping.get(m.group(1), m.group(1))}{m.group(2)}{m.group(3)}"
+        if kind == "fullparen":
+            return f"（{mapping.get(m.group(1), m.group(1))}）"
+        if kind == "halfparen":
+            return f"({mapping.get(m.group(1), m.group(1))})"
+        if kind == "list":
+            return f"{m.group(1)}{mapping.get(m.group(2), m.group(2))}{m.group(3)}"
+        if kind == "pair":
+            return f"{mapping.get(m.group(1), m.group(1))}{m.group(2)}"
+        return f"{mapping.get(m.group(1), m.group(1))}{m.group(2)}"
+
+    return pattern.sub(repl, text)
+
+
+def _remap_parse(parse, mapping):
+    """按白名单句式重映射字母；有无法识别的裸字母引用时返回 None。"""
+    if not parse:
+        return parse
+    out = parse
+    for pattern, kind in _PARSE_PATTERNS:
+        out = _sub_parse(pattern, kind, out, mapping)
+    residue = out
+    for pattern, _kind in _PARSE_PATTERNS:
+        residue = pattern.sub("", residue)
+    if _BARE_LETTER.search(residue):
+        return None
+    return out
+
+
+def _option_info(q):
+    opts = q.get("options")
+    if not isinstance(opts, list) or len(opts) < 2:
+        return None
+    if any(not isinstance(o, dict) for o in opts):
+        return None
+    keys = [str(o.get("key") or "").strip() for o in opts]
+    if len(set(keys)) != len(keys) or any(len(k) != 1 or k not in _LETTERS for k in keys):
+        return None
+    answer = str(q.get("answer") or "").strip()
+    if not answer or any(c not in keys for c in answer) or len(set(answer)) != len(answer):
+        return None
+    names = [str(o.get("name") or "") for o in opts]
+    if len(set(names)) != len(names) or any(_EXPLICIT_OPTION.search(n) for n in names):
+        return None
+    return opts, keys, answer
+
+
+def _iter_option_questions(items):
+    for q in items:
+        if not isinstance(q, dict):
+            continue
+        if q.get("type") in ("choice", "multiple"):
+            yield q
+        elif q.get("type") == "group":
+            for sub in q.get("subs") or []:
+                if isinstance(sub, dict) and sub.get("type") in ("choice", "multiple"):
+                    yield sub
+
+
+def _reorder_choice(opts, answer, target):
+    correct = next(o for o in opts if str(o.get("key")) == answer)
+    wrong = [o for o in opts if str(o.get("key")) != answer]
+    pos = _LETTERS.index(target)
+    ordered = wrong[:pos] + [correct] + wrong[pos:]
+    keys = [_LETTERS[i] for i in range(len(ordered))]
+    mapping = {str(old.get("key")): new for new, old in zip(keys, ordered)}
+    new_opts = []
+    for new, old in zip(keys, ordered):
+        item = dict(old)
+        item["key"] = new
+        new_opts.append(item)
+    return new_opts, target, mapping
+
+
+def _reorder_multiple(opts, answer, seed):
+    def sort_key(o):
+        raw = f"{seed}|{o.get('name')}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    ordered = sorted(opts, key=sort_key)
+    keys = [_LETTERS[i] for i in range(len(ordered))]
+    mapping = {str(old.get("key")): new for new, old in zip(keys, ordered)}
+    new_opts = []
+    for new, old in zip(keys, ordered):
+        item = dict(old)
+        item["key"] = new
+        new_opts.append(item)
+    new_answer = "".join(sorted(mapping[c] for c in answer))
+    return new_opts, new_answer, mapping
+
+
+def _assign_choice_targets(candidates):
+    quota = {k: 0 for k in _LETTERS}
+    targets = []
+    for _q, (_opts, keys, _answer) in candidates:
+        target = min(keys, key=lambda k: (quota[k], k))
+        quota[target] += 1
+        targets.append(target)
+    return targets
+
+
+def balance_chapter(items, seed_prefix):
+    """确定性均衡本章选项。返回统计；无法安全处理的题原样保留。"""
+    stats = {
+        "choice": 0, "multiple": 0, "already": 0, "skipped": 0,
+        "reasons": {}, "before": {k: 0 for k in _LETTERS}, "after": {k: 0 for k in _LETTERS},
+    }
+
+    def skip(reason):
+        stats["skipped"] += 1
+        stats["reasons"][reason] = stats["reasons"].get(reason, 0) + 1
+
+    choice_candidates = []
+    multiple_candidates = []
+    for q in _iter_option_questions(items):
+        info = _option_info(q)
+        if info is None:
+            skip("选项结构或文本不可安全重排")
+            continue
+        _opts, keys, answer = info
+        if _remap_parse(str(q.get("parse") or ""), {k: k for k in keys}) is None:
+            skip("解析含无法安全映射的字母引用")
+            continue
+        if q.get("type") == "choice":
+            if len(answer) != 1:
+                skip("单选答案不是单个字母")
+                continue
+            choice_candidates.append((q, info))
+        else:
+            multiple_candidates.append((q, info))
+
+    for q, (_opts, _keys, answer) in choice_candidates:
+        stats["before"][answer] += 1
+
+    targets = _assign_choice_targets(choice_candidates)
+    for (q, (opts, _keys, answer)), target in zip(choice_candidates, targets):
+        original = copy.deepcopy(q)
+        if answer == target:
+            stats["already"] += 1
+            stats["after"][answer] += 1
+            continue
+        new_opts, new_answer, mapping = _reorder_choice(opts, answer, target)
+        new_parse = _remap_parse(str(q.get("parse") or ""), mapping)
+        if new_parse is None:
+            q.clear()
+            q.update(original)
+            skip("解析重映射失败")
+            stats["after"][answer] += 1
+            continue
+        q["options"] = new_opts
+        q["answer"] = new_answer
+        q["parse"] = new_parse
+        stats["choice"] += 1
+        stats["after"][new_answer] += 1
+
+    for q, (opts, _keys, answer) in multiple_candidates:
+        stats["before"][answer[0]] += 1
+        original = copy.deepcopy(q)
+        new_opts, new_answer, mapping = _reorder_multiple(opts, answer, seed_prefix)
+        if new_answer == answer and [o.get("key") for o in new_opts] == [o.get("key") for o in opts]:
+            stats["already"] += 1
+            stats["after"][answer[0]] += 1
+            continue
+        new_parse = _remap_parse(str(q.get("parse") or ""), mapping)
+        if new_parse is None:
+            q.clear()
+            q.update(original)
+            skip("解析重映射失败")
+            stats["after"][answer[0]] += 1
+            continue
+        q["options"] = new_opts
+        q["answer"] = new_answer
+        q["parse"] = new_parse
+        stats["multiple"] += 1
+        stats["after"][new_answer[0]] += 1
+
+    return stats
+
+
+def format_balance_stats(stats):
+    letters = "".join(
+        k for k in _LETTERS if stats["before"][k] or stats["after"][k]
+    ) or "ABCD"
+    before = "/".join(str(stats["before"][k]) for k in letters)
+    after = "/".join(str(stats["after"][k]) for k in letters)
+    parts = [f"单选 {stats['choice']}", f"多选 {stats['multiple']}"]
+    if stats["already"]:
+        parts.append(f"已均衡 {stats['already']}")
+    if stats["skipped"]:
+        reasons = "、".join(f"{k} {v}" for k, v in stats["reasons"].items())
+        parts.append(f"跳过 {stats['skipped']}（{reasons}）")
+    parts.append(f"A/B/C/D {before} → {after}")
+    return "，".join(parts)
+
+
+def audit_existing(outdir, id_):
+    """对已有章节 JSON 只做内存试算，不写盘、不调 API。"""
+    files = sorted(
+        (p for p in outdir.glob("*.json") if p.name != "all.json"),
+        key=lambda p: _chapter_sort_key(p.stem),
+    )
+    if not files:
+        print(f"{outdir} 下没有章节 JSON")
+        return
+    for p in files:
+        try:
+            items = json.loads(_SPLIT.read_text_any(p))
+        except (OSError, json.JSONDecodeError):
+            print(f"{p.name}: 不是合法 JSON，跳过")
+            continue
+        if not isinstance(items, list):
+            continue
+        stats = balance_chapter(items, f"{id_}|{p.stem}")
+        print(f"{p.stem}: {format_balance_stats(stats)}")
 
 
 def build_config_text(id_, book, tag, counts, ratio, special):
@@ -518,6 +765,7 @@ def _load_cli_config(path):
         "overwrite": bool(data.get("overwrite", False)),
         "concurrency": max(1, min(8, int(data.get("concurrency", CONCURRENCY_DEFAULT)))),
         "rounds": max(1, int(data.get("rounds", 1))),
+        "balance_options": bool(data.get("balance_options", True)),
     }
 
 
@@ -531,12 +779,15 @@ def _parse_args():
     p.add_argument("--overwrite", action="store_true", help="覆盖已存在的章节 JSON")
     p.add_argument("--resplit", action="store_true",
                    help="按当前详细版覆盖重拆章节，并备份旧的 .分次 结果")
+    p.add_argument("--no-balance", action="store_true", help="不重排选项、不均衡答案字母")
+    p.add_argument("--audit", action="store_true",
+                   help="只对已有章节 JSON 试算均衡结果并打印分布，不写盘、不调 API")
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
-    if not AI_API_KEY:
+    if not AI_API_KEY and not args.audit:
         print("未配置 DEEPSEEK_API_KEY（环境变量或仓库根 .env），退出。")
         return
     id_ = _pick_id(args.id.strip() if args.id else None)
@@ -596,11 +847,17 @@ def main():
         cfg.setdefault("rounds", 1)
 
     rounds = max(1, int(cfg.get("rounds", 1)))
+    if args.no_balance:
+        cfg["balance_options"] = False
     doc = _SPLIT.read_text_any(PROMPT_FILE)
     outdir = DIR_OUT / _sanitize_dir(stem)
     runsdir = outdir / RUNS_DIRNAME
     outdir.mkdir(parents=True, exist_ok=True)
     runsdir.mkdir(parents=True, exist_ok=True)
+
+    if args.audit:
+        audit_existing(outdir, id_)
+        return
 
     if args.resplit:
         print(f"按 --resplit 重新拆分 {stem}…")
@@ -664,6 +921,9 @@ def main():
         out_ch = outdir / f"{f.stem}.json"
         if items:
             items, dropped = _dedupe_questions(items)
+            if cfg.get("balance_options", True):
+                stats = balance_chapter(items, f"{id_}|{f.stem}")
+                print(f"均衡 {f.stem}: {format_balance_stats(stats)}")
             out_ch.write_text(
                 json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"合并 {f.stem}: {len(items)} 题（去重 {dropped}）")
