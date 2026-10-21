@@ -309,6 +309,7 @@ cd /path/to/MinerU
 ```
 
    - 默认只打印 `chapter_pipeline1` 命令；确认后加 `--yes` 执行。
+   - 需要按 `###` 节拆分时加 `--split-by-section`（透传给 `chapter_pipeline1`）。
    - **不要照搬详细版命令**：`chapter_pipeline1.py` 没有 `--limit-kimi`。
    - 也可以直接跑：
      ```powershell

@@ -135,6 +135,8 @@ def build_run_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.force:
         cmd.append("--force")
+    if args.split_by_section:
+        cmd.append("--split-by-section")
     return cmd
 
 
@@ -221,6 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--id", required=True)
     pr.add_argument("--book")
     pr.add_argument("--force", action="store_true", help="透传 --force（全量重跑）")
+    pr.add_argument("--split-by-section", action="store_true",
+                    help="按 ### 节拆分（chapter_pipeline1 的 --split-by-section）")
     pr.add_argument("--yes", action="store_true", help="实际执行；默认只打印命令")
     pr.set_defaults(func=cmd_run)
 

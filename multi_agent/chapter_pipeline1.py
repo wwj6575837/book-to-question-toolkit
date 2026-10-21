@@ -131,22 +131,32 @@ class ChapterSlice:
 
 # 修复后的 RE_H2，支持 0-3 个空格前导
 RE_H2 = re.compile(r"^ {0,3}##\s+(.*?)\s*$")
+# 节级切分点（仅在 split_by_section 时启用）
+# 支持“### 第一节 …”与“### 2.1 …”两种节标题；三级编号（2.21.1）不算节
+RE_H3_SECTION = re.compile(
+    r"^ {0,3}###\s+(第\s*[一二三四五六七八九十百千万\d]+\s*节.*"
+    r"|\d+\.\d+(?![.\d])(?:\s.*)?)$")
 
-def split_one_book(md_text: str, know_id: int, book_name: str, chapter_dir: str) -> List[ChapterSlice]:
+def split_one_book(md_text: str, know_id: int, book_name: str, chapter_dir: str,
+                   split_by_section: bool = False) -> List[ChapterSlice]:
     lines = md_text.splitlines()
     h2_indices: List[Tuple[int, str]] = []
-    
+
     in_code_block = False
     for i, ln in enumerate(lines):
         if ln.strip().startswith("```"):
             in_code_block = not in_code_block
             continue
-            
+
         if not in_code_block:
             m = RE_H2.match(ln)
             if m:
                 h2_indices.append((i, m.group(1).strip()))
-                
+            elif split_by_section:
+                ms = RE_H3_SECTION.match(ln)
+                if ms:
+                    h2_indices.append((i, ms.group(1).strip()))
+
     if not h2_indices:
         return [ChapterSlice(know_id=know_id, book_name=book_name, chapter_no=1,
                              title="全书", content=md_text, prefix="全书",
@@ -221,7 +231,8 @@ def parse_book_filename(filename: str) -> Tuple[int, str]:
     return int(m.group(1)), m.group(2).strip()
 
 def scan_and_split_all(input_root: str,
-                       target_ids: Optional[set] = None) -> List[ChapterSlice]:
+                       target_ids: Optional[set] = None,
+                       split_by_section: bool = False) -> List[ChapterSlice]:
     all_chapters: List[ChapterSlice] = []
     if not os.path.isdir(input_root):
         return all_chapters
@@ -256,7 +267,8 @@ def scan_and_split_all(input_root: str,
                 print(f"[{now_str()}] [拆分] {kid}-{book_name}")
             try:
                 full_text = safe_read_text(md_path)
-                chapters = split_one_book(full_text, kid, book_name, chapter_dir)
+                chapters = split_one_book(full_text, kid, book_name, chapter_dir,
+                                          split_by_section=split_by_section)
                 all_chapters.extend(chapters)
                 with _PRINT_LOCK:
                     print(f"[{now_str()}] [拆分完成] {kid}-{book_name} -> {len(chapters)}章")
@@ -339,7 +351,7 @@ def process_one_chapter(
     ch_key = str(ch.chapter_index)
 
     with _PRINT_LOCK:
-        print(f"[{now_str()}] [章节开始] {ch.book_name} 第{ch.chapter_no}章")
+        print(f"[{now_str()}] [章节开始] {ch.book_name} 第{ch.chapter_no}章 {ch.title}")
 
     source_path = os.path.join(chapter_dir, f"{prefix}.source.md")
     deepseek_path = os.path.join(chapter_dir, f"{prefix}.deepseek_from_source.md")
@@ -372,7 +384,7 @@ def process_one_chapter(
 
     if (not force) and paths_ok and (prev_hash == chapter_hash or existing_source_hash == chapter_hash):
         with _PRINT_LOCK:
-            print(f"[{now_str()}] [章节跳过] {ch.book_name} 第{ch.chapter_no}章 已是最新")
+            print(f"[{now_str()}] [章节跳过] {ch.book_name} 第{ch.chapter_no}章 {ch.title} 已是最新")
         return ChapterResult(
             know_id=ch.know_id, book_name=ch.book_name, chapter_no=ch.chapter_no,
             chapter_index=ch.chapter_index,
@@ -401,13 +413,13 @@ def process_one_chapter(
                     sleep_s = min(retry_backoff * (2 ** (attempt - 1)), 60)
                     with _PRINT_LOCK:
                         print(f"[{now_str()}] [章节重试] {ch.book_name} 第{ch.chapter_no}章 "
-                              f"agent={tag} 第{attempt}/{retries+1}次失败；"
+                              f"{ch.title} agent={tag} 第{attempt}/{retries+1}次失败；"
                               f"{format_duration_cn(sleep_s)}后重试")
                     time.sleep(sleep_s)
                 else:
                     with _PRINT_LOCK:
                         print(f"[{now_str()}] [章节失败] {ch.book_name} 第{ch.chapter_no}章 "
-                              f"agent={tag} 在{retries+1}次尝试后仍失败")
+                              f"{ch.title} agent={tag} 在{retries+1}次尝试后仍失败")
                     raise
 
     def run_deepseek():
@@ -539,7 +551,7 @@ def process_one_chapter(
 
     if can_skip_merge:
         with _PRINT_LOCK:
-            print(f"[{now_str()}] [merge跳过] {ch.book_name} 第{ch.chapter_no}章 "
+            print(f"[{now_str()}] [merge跳过] {ch.book_name} 第{ch.chapter_no}章 {ch.title} "
                   f"{'agent输出未变' if skip_merge_unchanged else '未变且已存在'}")
     else:
         ts = time.time()
@@ -551,7 +563,7 @@ def process_one_chapter(
 
     elapsed = time.time() - t0
     with _PRINT_LOCK:
-        print(f"[{now_str()}] [章节完成] {ch.book_name} 第{ch.chapter_no}章 "
+        print(f"[{now_str()}] [章节完成] {ch.book_name} 第{ch.chapter_no}章 {ch.title} "
               f"用时{format_duration_cn(elapsed)} | "
               f"重试: ds={retries_map.get('deepseek',0)} db={retries_map.get('doubao',0)} "
               f"m={retries_map.get('merge',0)} | "
@@ -882,6 +894,7 @@ def run_pipeline(
     resume_partial: bool = False,
     skip_merge_unchanged: bool = False,
     auto_chunk: bool = False,
+    split_by_section: bool = False,
     limit_deepseek: Optional[int] = None,
     limit_doubao: Optional[int] = None,
 ) -> None:
@@ -908,13 +921,15 @@ def run_pipeline(
             if flag:
                 print(f"[{now_str()}] {name}: 开启")
 
-    all_chapters = scan_and_split_all(input_root, target_ids)
+    all_chapters = scan_and_split_all(input_root, target_ids, split_by_section)
     if not all_chapters:
         with _PRINT_LOCK:
             print(f"[{now_str()}] [结束] 没有找到任何章节")
         return
 
     book_ids = sorted(set(ch.know_id for ch in all_chapters))
+    prefix_by_key = {(c.know_id, c.chapter_index): c.prefix for c in all_chapters}
+    hash_by_key = {(c.know_id, c.chapter_index): compute_hash(c.content) for c in all_chapters}
     total = len(all_chapters)
     with _PRINT_LOCK:
         print(f"[{now_str()}] [拆分汇总] {len(book_ids)}本书，共{total}章")
@@ -957,7 +972,9 @@ def run_pipeline(
             if ch_rec.get("status") == "done" and ch_rec.get("artifacts"):
                 art = ch_rec["artifacts"]
                 merged = art.get("merged", "")
-                if merged and os.path.exists(merged):
+                expected_merged = os.path.join(ch.chapter_dir, f"{ch.prefix}.merged_from_source.md")
+                if (merged and merged == expected_merged and os.path.exists(merged)
+                        and ch_rec.get("chapter_hash") == compute_hash(ch.content)):
                     with _PRINT_LOCK:
                         print(f"[{now_str()}] [跳过] {ch.book_name} 第{ch.chapter_no}章 上次已完成")
                     with completed_lock:
@@ -1025,16 +1042,19 @@ def run_pipeline(
             existing_ids = {r.chapter_index for r in book_groups.get(kid, [])}
             for ck, ch_rec in book_rec.get("chapters", {}).items():
                 cidx = int(ck)
+                expected_prefix = prefix_by_key.get((kid, cidx), "")
                 if cidx not in existing_ids and ch_rec.get("status") == "done" and ch_rec.get("artifacts"):
                     art = ch_rec["artifacts"]
                     merged = art.get("merged", "")
-                    if merged and os.path.exists(merged):
+                    expected_merged = os.path.join(input_root, str(kid), f"{expected_prefix}.merged_from_source.md")
+                    if (merged and merged == expected_merged and os.path.exists(merged)
+                            and ch_rec.get("chapter_hash") == hash_by_key.get((kid, cidx))):
                         ch_name = ch_rec.get("book_name", "")
                         book_groups.setdefault(kid, []).append(ChapterResult(
                             know_id=kid, book_name=ch_name or "",
                             chapter_no=ch_rec.get("chapter_no", cidx),
                             chapter_index=cidx,
-                            prefix="", title="",
+                            prefix=expected_prefix, title="",
                             source_path=art.get("source", ""),
                             deepseek_path=art.get("deepseek", ""),
                             doubao_path=art.get("doubao", ""),
@@ -1116,6 +1136,7 @@ def main():
     parser.add_argument("--resume-partial", action="store_true")
     parser.add_argument("--skip-merge-unchanged", action="store_true")
     parser.add_argument("--auto-chunk", action="store_true")
+    parser.add_argument("--split-by-section", action="store_true")
     parser.add_argument("--limit-deepseek", type=int, default=None)
     parser.add_argument("--limit-doubao", type=int, default=None)
 
@@ -1136,6 +1157,7 @@ def main():
         resume_partial=args.resume_partial,
         skip_merge_unchanged=args.skip_merge_unchanged,
         auto_chunk=args.auto_chunk,
+        split_by_section=args.split_by_section,
         limit_deepseek=args.limit_deepseek,
         limit_doubao=args.limit_doubao)
 
