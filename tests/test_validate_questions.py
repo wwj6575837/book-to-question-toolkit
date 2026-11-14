@@ -22,19 +22,22 @@ def test_cross_chapter_exact_duplicate_is_error():
         [("第一章", "下列哪项说法正确？"), ("第二章", "下列哪项说法正确？")],
         errors,
         warnings,
+        False,
     )
     assert any("跨章重复题" in e for e in errors)
     assert not warnings
 
 
-def test_same_chapter_duplicate_not_reported():
+def test_same_chapter_duplicate_is_error():
     errors, warnings = [], []
-    vq.cross_chapter_dups([("第一章", "题A"), ("第一章", "题A")], errors, warnings)
-    assert not errors
+    vq.cross_chapter_dups(
+        [("第一章", "题A"), ("第一章", "题A")], errors, warnings, False
+    )
+    assert any("同章重复题" in e for e in errors)
     assert not warnings
 
 
-def test_near_duplicate_across_chapters_warns():
+def test_near_duplicate_across_chapters_is_error():
     errors, warnings = [], []
     vq.cross_chapter_dups(
         [
@@ -43,9 +46,10 @@ def test_near_duplicate_across_chapters_warns():
         ],
         errors,
         warnings,
+        False,
     )
-    assert not errors
-    assert any("跨章近似题" in w for w in warnings)
+    assert any("跨章近似题" in e for e in errors)
+    assert not warnings
 
 
 def option_question(title, tag, typ="choice", answer="A", count=4):
@@ -67,32 +71,32 @@ def answer_pairs(typ, answers, count=4):
     return [(typ, answer, count) for answer in answers]
 
 
-def test_single_choice_concentration_warns():
-    warnings = []
+def test_single_choice_concentration_is_error():
+    errors, warnings = [], []
     data = answer_pairs("choice", ["A"] * 10)
 
-    vq.check_answer_balance({"第一章": data}, data, warnings)
+    vq.check_answer_balance({"第一章": data}, data, errors, warnings, False)
 
-    assert any("单选答案集中" in w for w in warnings)
-    assert any("缺失" in w for w in warnings)
+    assert any("单选答案集中" in e for e in errors)
+    assert any("缺失" in e for e in errors)
 
 
 def test_balanced_single_choice_has_no_warning():
-    warnings = []
+    errors, warnings = [], []
     data = answer_pairs("choice", list("ABCD") * 5)
 
-    vq.check_answer_balance({"第一章": data}, data, warnings)
+    vq.check_answer_balance({"第一章": data}, data, errors, warnings, False)
 
-    assert not any("单选答案" in w or "多选答案" in w for w in warnings)
+    assert not any("单选答案" in x or "多选答案" in x for x in errors + warnings)
 
 
-def test_multiple_combo_concentration_warns():
-    warnings = []
+def test_multiple_combo_concentration_is_error():
+    errors, warnings = [], []
     data = answer_pairs("multiple", ["ABC"] * 12)
 
-    vq.check_answer_balance({}, data, warnings)
+    vq.check_answer_balance({}, data, errors, warnings, False)
 
-    assert any("多选答案组合集中" in w for w in warnings)
+    assert any("多选答案组合集中" in e for e in errors)
 
 
 def test_main_prints_answer_distribution(tmp_path, capsys):
@@ -156,7 +160,7 @@ def test_difficulty_target_deviation_strict():
         {"简单": 0.5, "中等": 0.3, "困难": 0.2},
         errors,
         warnings,
-        True,
+        False,
     )
     assert any("全书难度" in e for e in errors)
 
