@@ -26,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 DETAIL_DIR = REPO_ROOT / "exports" / "multi_agent" / "final" / "书籍库"
 INPUT_ROOT = REPO_ROOT / "exports" / "multi_agent" / "final" / "精简版-按章"
 OUTPUT_DIR = REPO_ROOT / "exports" / "multi_agent" / "final" / "精简版"
@@ -119,6 +121,47 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+_FLAG_CACHE: dict[str, set[str]] = {}
+
+
+def supported_flags(module: str) -> set[str]:
+    """探测模块 --help 支持哪些参数；探测失败返回空集（调用方按“不过滤”处理）。"""
+    if module not in _FLAG_CACHE:
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", module, "--help"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=180,
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _FLAG_CACHE[module] = set(re.findall(r"--[a-z][a-z0-9-]+", out))
+    return _FLAG_CACHE[module]
+
+
+def _filter_flags(tokens: list[str], flags: set[str]) -> list[str]:
+    """丢掉目标模块不认识的 --flag 及其紧随的值。"""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            if tok not in flags:
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                    i += 1
+                i += 1
+                continue
+            out.append(tok)
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                out.append(tokens[i + 1])
+                i += 1
+        else:
+            out.append(tok)
+        i += 1
+    return out
+
+
 def build_run_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         sys.executable, "-m", "multi_agent.chapter_pipeline1",
@@ -130,6 +173,7 @@ def build_run_cmd(args: argparse.Namespace) -> list[str]:
         "--skip-merge-unchanged",
         "--limit-deepseek", "15",
         "--limit-doubao", "15",
+        "--limit-merge", "8",
         "--retries", str(args.retries if args.retries is not None else 2),
         "--retry-backoff", "10",
     ]
@@ -139,6 +183,9 @@ def build_run_cmd(args: argparse.Namespace) -> list[str]:
         cmd.append("--force")
     if args.split_by_section:
         cmd.append("--split-by-section")
+    flags = supported_flags("multi_agent.chapter_pipeline1")
+    if flags:
+        cmd = _filter_flags(cmd, flags)
     return cmd
 
 
@@ -227,6 +274,75 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _merge_stats(total, one) -> None:
+    for name in ("total", "table", "fixed_key", "fixed_caption", "fixed_order",
+                 "wrong_links", "duplicates", "detail_only", "unmatched",
+                 "non_cdn", "removed"):
+        setattr(total, name, getattr(total, name) + getattr(one, name))
+    for tag, items in one.samples.items():
+        total.samples.setdefault(tag, []).extend(items)
+
+
+def cmd_relink(args: argparse.Namespace) -> int:
+    from image_relink import Stats, format_report, relink_text
+    from mdscan import read_text_any, split_at_headings
+
+    try:
+        detail = find_detail(str(args.id), args.book, args.detail)
+        compact = find_compact(str(args.id), args.book, args.compact)
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
+
+    dtext = read_text_any(detail)
+    ctext = read_text_any(compact)
+    print(f"详细版：{detail.name}")
+    print(f"精简版：{compact.name}")
+
+    total = Stats()
+    dpre, dblocks = split_at_headings(dtext.splitlines(), 2)
+    cpre, cblocks = split_at_headings(ctext.splitlines(), 2)
+    titles_d = [t for t, _ in dblocks]
+    titles_c = [t for t, _ in cblocks]
+
+    if dblocks and titles_d == titles_c:
+        new_lines = list(cpre)
+        for (title, dlines), (_, clines) in zip(dblocks, cblocks):
+            body, st = relink_text("\n".join(clines), "\n".join(dlines),
+                                   pct=args.pct, dedupe=args.dedupe)
+            _merge_stats(total, st)
+            if st.changed:
+                print(f"  [{title}] 修正 {st.fixed_key + st.fixed_caption} 处｜"
+                      f"重复 {st.duplicates}｜无法对齐 {st.unmatched}")
+            # 用 split("\n") 而非 splitlines()，保留章末空行
+            new_lines.extend(body.split("\n"))
+        new_text = "\n".join(new_lines) + ("\n" if ctext.endswith("\n") else "")
+    else:
+        print(f"⚠ 章节标题数量/顺序不一致（详细 {len(dblocks)}，精简 {len(cblocks)}），"
+              "退化为整文件回链（低置信）")
+        new_text, st = relink_text(ctext, dtext, pct=args.pct, dedupe=args.dedupe)
+        _merge_stats(total, st)
+
+    print()
+    print(format_report(total))
+    if new_text == ctext:
+        print("\n无改动。")
+        return 0
+
+    print("\n有改动；加 --apply 写回。")
+    if not args.apply:
+        return 0
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = compact.with_name(f"{compact.name}.bak-relink-{stamp}")
+    backup.write_bytes(compact.read_bytes())
+    bom = compact.read_bytes().startswith(b"\xef\xbb\xbf")
+    compact.write_text(new_text, encoding="utf-8-sig" if bom else "utf-8")
+    print(f"已写回：{compact}")
+    print(f"备份：{backup.name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="book-to-question：精简版阶段")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -260,6 +376,16 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--progress", help="精简版 progress.json（默认自动定位）")
     pv.add_argument("--book-json", help="更新 book.json 的 stages.compact")
     pv.set_defaults(func=cmd_verify)
+
+    pl = sub.add_parser("relink", help="按详细版回链精简版图片（默认 dry-run）")
+    pl.add_argument("--id", required=True)
+    pl.add_argument("--book")
+    pl.add_argument("--detail", help="显式指定详细版文件")
+    pl.add_argument("--compact", help="显式指定精简版文件")
+    pl.add_argument("--pct", type=int, default=50, help="七牛缩放比例，默认 50")
+    pl.add_argument("--dedupe", action="store_true", help="删除重复出现的图（默认只报告）")
+    pl.add_argument("--apply", action="store_true", help="实际写回（默认 dry-run）")
+    pl.set_defaults(func=cmd_relink)
     return p
 
 

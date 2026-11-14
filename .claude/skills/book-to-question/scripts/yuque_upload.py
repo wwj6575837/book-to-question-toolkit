@@ -40,8 +40,16 @@ BASE = "https://www.yuque.com/api/v2"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ROOT_ENV_FILE = REPO_ROOT / ".env"
 INDEX_NAME = "000-文件索引.md"
+# organized 目录里的中间产物特征；--dir 上传时一律跳过
+EXCLUDE_MARKERS = (
+    ".source",
+    ".merged_from_source",
+    ".deepseek_from_source",
+    ".doubao_from_source",
+    ".slice",
+)
 
-_ILLEGAL_SLUG = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff_-]+")
+_ILLEGAL_SLUG = re.compile(r"[^0-9A-Za-z_-]+")
 
 
 def load_env_value(key: str) -> str:
@@ -294,7 +302,9 @@ def attach_doc(api: Yuque, repo: str, doc_id: int, parent_uuid: str) -> None:
 
 def make_slug(title: str) -> str:
     import hashlib
-    base = _ILLEGAL_SLUG.sub("-", title).strip("-").lower()[:80] or "doc"
+    base = _ILLEGAL_SLUG.sub("-", title).strip("-").lower()[:80]
+    if not base:
+        base = "doc"
     suffix = hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
     return f"{base}-{suffix}"
 
@@ -310,12 +320,16 @@ def collect_files(args: argparse.Namespace) -> list[tuple[str, Path]]:
     if not directory.is_dir():
         raise ValueError(f"目录不存在：{directory}")
     out = []
-    for p in sorted(directory.glob("*.md")):
+    for p in sorted(directory.glob(args.include)):
         if p.name == INDEX_NAME:
             continue
+        if any(marker in p.name for marker in EXCLUDE_MARKERS):
+            continue
         title = p.stem
-        if args.strip_suffix and title.endswith(args.strip_suffix):
-            title = title[: -len(args.strip_suffix)]
+        if args.strip_suffix:
+            title = re.sub(
+                re.escape(args.strip_suffix) + r"(?=-部分\d+$|$)", "", title
+            )
         out.append((title, p))
     return out
 
@@ -518,10 +532,13 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--flat", action="store_true",
                     help="文档直接挂在 section 下，不建 <id>-<书名> 子分组（详细版/精简版用）")
     src = pu.add_mutually_exclusive_group(required=True)
-    src.add_argument("--dir", help="原书：目录下所有 *.md（跳过 000-文件索引.md）")
+    src.add_argument("--dir", help="原书：目录下匹配 --include 的文件（跳过 000-文件索引.md）")
     src.add_argument("--file", help="详细版：单个 md")
+    pu.add_argument("--include", default="*.md",
+                    help="--dir 的文件通配；原书用 '*_full*.md'，避免上传中间产物")
     pu.add_argument("--doc-title", help="配合 --file 的文档标题")
-    pu.add_argument("--strip-suffix", default="_full", help="去掉文件名的后缀（默认 _full）")
+    pu.add_argument("--strip-suffix", default="_full",
+                    help="去掉文件名中的该后缀（默认 _full，兼容结尾与 -部分N 之前）")
     pu.add_argument("--update", action="store_true", help="已存在的同标题文档改为更新")
     pu.add_argument("--apply", action="store_true", help="默认 dry-run；加此参数才写")
     pu.add_argument("--dry-run", action="store_true", help="显式 dry-run（默认行为）")
