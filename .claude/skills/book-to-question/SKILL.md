@@ -266,6 +266,17 @@ cd /path/to/MinerU
 - WARN（行内 `$` 截断、`\tag` 残留、`$` 与 `\(` 混用、`$$` 与文字同行）列入人工抽查清单。
 - 只读检查，不自动改文件；`--json` 输出结构化结果，`--stats` 只看汇总。
 
+**KaTeX 实渲染（静态检查之后必做）：**
+
+```powershell
+.venv\Scripts\python.exe .claude\skills\book-to-question\scripts\check_katex.py `
+  --file "exports\multi_agent\final\书籍库\<id>-1 <书名>.md"
+```
+
+- 解析失败必须先修，修好前不进入阶段 4；警告（数学环境里的中文、未知 Unicode 符号）列入抽查。
+- 可确定修复的问题先跑 `fix_render.py --file <详细版> --apply`（默认 dry-run，写盘前备份）：根号、中文进数学环境、`${`、`℃`、Unicode 符号、乘号星号，以及被错误 `$` 拆开的集合式。
+- 仍有解析错误时跑 `fix_render_llm.py --file <详细版> --apply`：逐条调用 DeepSeek（需 `DEEPSEEK_API_KEY`），每条修完必须重新通过 KaTeX；模型拿不准会输出 `__UNFIXABLE__` 保留原样。修完重跑静态检查与 KaTeX。
+
 ## 阶段 4：上题（按轮次）
 
 1. 准备正文（详细版优先，缺失回退 `_full.md`）：
@@ -301,6 +312,9 @@ cd /path/to/MinerU
 ```
 
    - 非 JSON 文件 = 失败章节原文；`_failed.txt` 存在则本阶段不能标记完成。
+   - **题目 LaTeX 校验**（`title` / `options` / `parse`，含组合题子题）以下为 error：`${`（应写成 `$\{...\}$`）、Unicode 根号 `√`（应写成 `$\sqrt{...}$`）、数学环境里的中文/全角标点未包 `\text{}`、花括号/`\left\right`/`\begin\end` 不配对、`$$` 未闭合、JSON 转义残留。空公式、`$$` 与正文同行、`\tag`、行内 `$` 不成对、混用分隔符、单个 `*` 可能被 Markdown 渲染成斜体只告警。
+   - **KaTeX 实渲染**：`validate_questions.py` 默认调用 `check_katex.py`，解析失败为 error、KaTeX 警告为 warning；本机没有 node/KaTeX 时自动跳过并提示。`--no-katex` 关闭，`--katex-path` 指定包目录。
+   - **自动修正**：`fix_render.py --questions-dir "补题/题目/<id><书名>" --apply` 处理可确定的渲染问题；剩余解析错误用 `fix_render_llm.py --questions-dir ... --apply` 逐条兜底。写盘前都会备份，修完必须重跑 `validate_questions.py`。
 5. 第三批（新教研后台）与系统题库录入：见 [references/manual-steps.md](references/manual-steps.md)。
 6. **上题校验完成后，问用户「要不要跑精简版？」**；要就跑阶段 5，不要就结束。不要自动跑。
 
