@@ -172,6 +172,11 @@ def check_text(text: str, file: str = "<text>") -> list[Issue]:
     uses_paren = "\\(" in clean or "\\[" in clean
     if uses_dollar and uses_paren:
         issues.append(Issue(file, 1, "WARN", "mixed-delimiter", "同一文件混用 $ 与 \\(/\\[ 分隔符"))
+    if "\\(" in clean:
+        issues.append(
+            Issue(file, 1, "ERROR", "paren-delimiter",
+                  "行内公式统一用 $...$；\\(...\\) 在部分渲染器里不换行，可跑 fix_render.py 自动转换")
+        )
 
     # 行内 $：同一行内必须成对；奇数视为截断
     inline_clean = BLOCK.sub(lambda m: "\n" * m.group(0).count("\n"), clean)

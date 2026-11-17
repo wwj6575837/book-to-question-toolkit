@@ -72,12 +72,19 @@
 
 ## 3. 公式渲染检查（清理补齐之后必做）
 
+`chapter_pipeline` 在最终拼接时已自动把 `\(...\)` 归一成 `$...$`、`\[...\]` 归一成独立 `$$` 块。存量详细版先跑一次归一化（默认 dry-run，`--apply` 写盘并备份）：
+
+```powershell
+.venv\Scripts\python.exe .claude\skills\book-to-question\scripts\fix_render.py `
+  --file "exports\multi_agent\final\书籍库\<id>-1 <书名>.md" --apply
+```
+
 ```powershell
 .venv\Scripts\python.exe .claude\skills\book-to-question\scripts\check_formulas.py `
   --file "exports\multi_agent\final\书籍库\<id>-1 <书名>.md"
 ```
 
-- ERROR（`$$` 未闭合、`$`/`\(`/`\[` 不配对、花括号或 `\begin/\end` 不平衡）必须先修，修好前不进入阶段 4。
+- ERROR（`$$` 未闭合、`$`/`\(`/`\[` 不配对、行内仍用 `\(...\)`、花括号或 `\begin/\end` 不平衡）必须先修，修好前不进入阶段 4。
 - WARN（行内 `$` 截断、`\tag` 残留、`$` 与 `\(` 混用、`$$` 与文字同行）列入人工抽查清单。
 - 只读检查，不自动改文件；`--json` 输出结构化结果，`--stats` 只看汇总。
 

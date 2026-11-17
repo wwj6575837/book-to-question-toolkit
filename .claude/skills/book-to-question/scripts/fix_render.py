@@ -58,6 +58,7 @@ SYMBOLS = {
     "⊙": "\\odot ", "∖": "\\setminus ", "≌": "\\cong ",
     "∪": "\\cup ", "∩": "\\cap ", "∑": "\\sum ", "∏": "\\prod ",
     "∫": "\\int ",
+    "–": "-", "—": "-",
     "℃": "^\\circ\\mathrm{C}", "℉": "^\\circ\\mathrm{F}",
     "π": "\\pi ", "α": "\\alpha ", "β": "\\beta ", "γ": "\\gamma ",
     "Δ": "\\Delta ", "θ": "\\theta ", "λ": "\\lambda ", "μ": "\\mu ",
@@ -247,6 +248,8 @@ def _replace_radicals(expr: str) -> str:
 
 
 def _fix_segment(seg: str) -> str:
+    seg = seg.replace("\\AA", "\\text{Å}").replace("\\aa", "\\text{å}")
+    seg = seg.replace("\\circC", "\\circ\\mathrm{C}").replace("\\circF", "\\circ\\mathrm{F}")
     for key, val in SYMBOLS.items():
         if key in seg:
             seg = seg.replace(key, val)
@@ -390,11 +393,38 @@ def merge_split_math(text: str) -> str:
     return "".join(out)
 
 
+def normalize_delimiters(text: str) -> tuple[str, int]:
+    """\\(...\\) 统一成 $...$，\\[...\\] 统一成独立 $$ 块。"""
+    masked = _mask_code(text)
+    out, last, i, n = [], 0, 0, 0
+    while i < len(masked):
+        if masked.startswith("\\[", i):
+            j = masked.find("\\]", i + 2)
+            if j >= 0:
+                body = text[i + 2:j].strip()
+                out.append(text[last:i])
+                out.append("\n$$\n" + body + "\n$$\n")
+                last, i, n = j + 2, j + 2, n + 1
+                continue
+        if masked.startswith("\\(", i):
+            j = masked.find("\\)", i + 2)
+            if j >= 0:
+                body = text[i + 2:j].strip()
+                out.append(text[last:i])
+                out.append("$" + body + "$")
+                last, i, n = j + 2, j + 2, n + 1
+                continue
+        i += 1
+    out.append(text[last:])
+    return "".join(out), n
+
+
 def fix_markdown(text: str, merge: bool = True) -> tuple[str, int]:
+    text, delim_changes = normalize_delimiters(text)
     if merge:
         text = merge_split_math(text)
     ranges = math_ranges(_mask_code(text))
-    out, last, changes = [], 0, 0
+    out, last, changes = [], 0, delim_changes
     for start, end, kind in ranges:
         pad = 1 if kind == "inline" else 2
         if end - start < pad * 2:
@@ -420,10 +450,27 @@ def _is_punct(ch: str) -> bool:
     return bool(ch) and unicodedata.category(ch)[0] in "PS"
 
 
+def _fence_block_ranges(text: str) -> list[tuple[int, int]]:
+    """按独立成行的 $$ 围栏切块；比全局配对更稳，避免前面多一个 $$ 导致错位。"""
+    out, open_at, pos = [], None, 0
+    for line in text.splitlines(keepends=True):
+        if line.strip() == "$$":
+            if open_at is None:
+                open_at = pos
+            else:
+                out.append((open_at, pos + len(line)))
+                open_at = None
+        pos += len(line)
+    return out
+
+
 def fix_stars(text: str) -> str:
     """数学与代码之外、会触发 Markdown 斜体的单个 * 改成 \\*。"""
     chars = list(text)
     for start, end, _kind in math_ranges(text):
+        for i in range(start, end):
+            chars[i] = " "
+    for start, end in _fence_block_ranges(text):
         for i in range(start, end):
             chars[i] = " "
     for m in FENCE.finditer(text):

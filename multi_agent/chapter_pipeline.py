@@ -484,6 +484,28 @@ def sanitize_horizontal_rules(text: str) -> str:
     except Exception:
         return text
 
+
+_FENCE_RE = re.compile(r"(```|~~~).*?\1", re.S)
+_INLINE_MATH_RE = re.compile(r"\\\((.*?)\\\)", re.S)
+_BLOCK_MATH_RE = re.compile(r"\\\[(.*?)\\\]", re.S)
+
+
+def normalize_math_delimiters(text: str) -> str:
+    """行内 \\(...\\) 统一成 $...$，块级 \\[...\\] 统一成独立 $$ 块；代码块内不动。"""
+    def conv(seg: str) -> str:
+        seg = _INLINE_MATH_RE.sub(lambda m: "$" + m.group(1).strip() + "$", seg)
+        seg = _BLOCK_MATH_RE.sub(lambda m: "\n$$\n" + m.group(1).strip() + "\n$$\n", seg)
+        return seg
+
+    out, last = [], 0
+    for m in _FENCE_RE.finditer(text):
+        out.append(conv(text[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(conv(text[last:]))
+    return "".join(out)
+
+
 def int_to_cn(n: int) -> str:
     """Convert 1..99 to Chinese numerals used in headings (一, 二, ... 十, 十一...)."""
     try:
@@ -1782,7 +1804,7 @@ def stitch_book_final(know_id: int, book_name: str, chapter_results: List[Chapte
     for ch in chapter_results:
         if os.path.exists(ch.merged_path):
             parts.append(safe_read_text(ch.merged_path))
-    text = "\n\n\n".join(parts)
+    text = normalize_math_delimiters("\n\n\n".join(parts))
     # Output path
     out_dir = os.path.join(final_root)
     ensure_dir(out_dir)

@@ -115,8 +115,8 @@ metadata:
 1. 跑流水线 → `exports\multi_agent\final\书籍库\<id>-1 <书名>.md`，标准参数：`-m multi_agent.chapter_pipeline --ids <id> --auto-chunk --max-workers 6 --chapter-max-workers 7 --resume-partial --skip-merge-unchanged --limit-deepseek 15 --limit-doubao 15 --limit-merge 8 --retries 2 --retry-backoff 10`。**默认不加 `--force`**，只有 organized 变更且用户确认要烧 API 时才加。`--limit-kimi` 已失效，别写；并发怎么设见 [detail.md](references/detail.md)「1b」。
 2. 校验：`## 第X章` 数与 `book.json.chapters`/`000-文件索引.md` 一致；`## 章`/`### 节` 层级正确；无空章、无错序。
 3. **清理与补齐（merge 常出问题，必须做）**：先 `clean_detail.py`（去重复章、压平跑偏的 `##` 小节），再 `supplement_detail.py`（merge 丢后面的节时从豆包产物补齐）；两个都先 dry-run 看清单。
-4. **公式检查**：`check_formulas.py`，ERROR（`$$` 未闭合、`$`/`\(`/`\[` 不配对等）必须先修；再跑 `check_katex.py --file <详细版>` 做真实 KaTeX 渲染，解析失败同样必须先修，修好前不进阶段 4。警告（数学环境里的中文、`%`、`\tag` 等）列入人工抽查。
-   - 可确定修复的渲染问题先跑 `fix_render.py --file <详细版> --apply`（默认 dry-run，写盘前备份）；它只改数学环境，不猜缺参数等解析错误。修完重跑 `check_formulas.py` 和 `check_katex.py`。
+4. **公式检查**：流水线最终拼接时会自动把 `\(...\)` 归一成 `$...$`、`\[...\]` 归一成 `$$` 块；存量文件先跑 `fix_render.py --file <详细版> --apply`（默认 dry-run，写盘前备份）做同样归一化，再跑 `check_formulas.py`。`check_formulas.py` 的 ERROR（`$$` 未闭合、`$`/`\(`/`\[` 不配对、行内仍用 `\(...\)` 等）必须先修；再跑 `check_katex.py --file <详细版>` 做真实 KaTeX 渲染，解析失败同样必须先修，修好前不进阶段 4。警告（数学环境里的中文、`%`、`\tag` 等）列入人工抽查。
+   - `fix_render.py` 还会修根号、中文进数学环境、`${`、`℃`、Unicode 符号、乘号星号和被 `$` 拆开的集合式；它只改可确定的问题，不猜缺参数等解析错误。修完重跑 `check_formulas.py` 和 `check_katex.py`。
    - 仍有解析错误时跑 `fix_render_llm.py --file <详细版> --apply`：逐条调用 DeepSeek（需 `DEEPSEEK_API_KEY`，默认最多 20 条），每条修完必须重新通过 KaTeX；模型判断必须猜测的输出 `__UNFIXABLE__`，保留原样等人工处理。
 
 完整命令与常见症状见 **[detail.md](references/detail.md)**。
