@@ -173,7 +173,7 @@ metadata:
 
 ## 阶段 5：精简版（可选）
 
-输入必须是**详细版**，不是原书 `_full.md`。三步：`compact_stage.py prepare --id <id> --book "<书名>"` → `run --id <id> --yes`（默认只打印命令）→ `verify --id <id> --book "<书名>"`。再加一步节级覆盖：`check_coverage.py --detail <详细版> --compact <精简版>`，确认详细版的每一节都还在。产物 `exports\multi_agent\final\精简版\<id>-2 <书名>.md`，通过后 `book.json` 的 `stages.compact` 记 `done`，再传语雀「精简版」分组。
+输入必须是**详细版**，不是原书 `_full.md`。三步：`compact_stage.py prepare --id <id> --book "<书名>"` → `run --id <id> --yes`（默认只打印命令）→ `verify --id <id> --book "<书名>"`。再加一步节级覆盖：`check_coverage.py --detail <详细版> --compact <精简版>`，确认详细版的每一节都还在；缺节先 `--fill --yes` 从详细版补，仍缺再 `--rerun --yes` 按缺失章重跑精简版。产物 `exports\multi_agent\final\精简版\<id>-2 <书名>.md`，通过后 `book.json` 的 `stages.compact` 记 `done`，再传语雀「精简版」分组。
 
 流水线默认在每章 merge 后按详细版回链图片（`--no-relink` 关闭，`--relink-dedupe` 顺带删重复图）。存量成品可单独跑 `compact_stage.py relink --id <id> [--apply] [--dedupe]`，默认只报告。
 

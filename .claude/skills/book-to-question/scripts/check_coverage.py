@@ -288,10 +288,16 @@ def agent_block(title: str, body: str) -> list[str]:
     return out
 
 
-def fill_missing(detail: Path, source: Path, result: dict, apply: bool) -> tuple[int, list[tuple[str, str]]]:
-    text = read_text_any(detail)
+def fill_missing(target: Path, ref_chapters: list[dict], result: dict, apply: bool,
+                 provider=None) -> tuple[int, list[tuple[str, str]]]:
+    """按参考章节顺序重建 target 的缺失节。
+
+    provider(chapter_title, need_titles) -> {normalized_title: (title, body)}
+    为 None 时直接用 ref_chapters 里的节（精简版从详细版补）。
+    """
+    text = read_text_any(target)
     lines = text.splitlines()
-    src_by_norm = {norm_chapter(ch["title"]): ch for ch in read_source(source)}
+    ref_by_norm = {norm_chapter(ch["title"]): ch for ch in ref_chapters}
     missing_by_ch: dict[str, list[str]] = {}
     for ch, sec in result.get("missing_items") or []:
         missing_by_ch.setdefault(ch, []).append(sec)
@@ -301,17 +307,21 @@ def fill_missing(detail: Path, source: Path, result: dict, apply: bool) -> tuple
     for start, end, ch_title in chapter_ranges(lines):
         if ch_title not in missing_by_ch:
             continue
-        src_ch = src_by_norm.get(norm_chapter(ch_title))
-        if src_ch is None:
+        ref_ch = ref_by_norm.get(norm_chapter(ch_title))
+        if ref_ch is None:
             continue
         missing = {norm_title(t) for t in missing_by_ch[ch_title]}
         preamble, dsecs = split_chapter_sections(lines, start, end)
         dmap = {norm_title(t): (t, block) for t, block in dsecs}
-        need = [s["title"] for s in src_ch["sections"] if norm_title(s["title"]) in missing]
-        ab = agent_section_blocks(source, ch_title, need)
+        need = [s["title"] for s in ref_ch["sections"] if norm_title(s["title"]) in missing]
+        if provider is None:
+            ab = {norm_title(s["title"]): (s["title"], s["body"])
+                  for s in ref_ch["sections"] if norm_title(s["title"]) in missing}
+        else:
+            ab = provider(ch_title, need)
         new = list(preamble)
         used = set()
-        for sec in src_ch["sections"]:
+        for sec in ref_ch["sections"]:
             k = norm_title(sec["title"])
             if k in dmap:
                 new.extend(dmap[k][1])
@@ -323,17 +333,17 @@ def fill_missing(detail: Path, source: Path, result: dict, apply: bool) -> tuple
                     used.add(k)
                 else:
                     still.append((ch_title, sec["title"]))
-        src_keys = {norm_title(s["title"]) for s in src_ch["sections"]}
+        ref_keys = {norm_title(s["title"]) for s in ref_ch["sections"]}
         for k, (_t, block) in dmap.items():
-            if k not in used and k not in src_keys:
+            if k not in used and k not in ref_keys:
                 new.extend(block)
         replacements.append((start, end, new))
     if apply and filled:
         for start, end, new in sorted(replacements, reverse=True):
             lines[start:end] = new
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        shutil.copy2(detail, detail.with_name(detail.name + f".bak-fill-{stamp}"))
-        detail.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8-sig")
+        shutil.copy2(target, target.with_name(target.name + f".bak-fill-{stamp}"))
+        target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8-sig")
     return filled, still
 
 
@@ -434,7 +444,9 @@ def check_compact(detail: Path, compact: Path, min_ratio: float, errors: list, w
             errors.append(f"精简版缺少节：{d_ch} / {sec['title']}")
     for c_ch, sec in extra_items:
         warns.append(f"精简版多出节：{c_ch} / {sec['title']}")
-    return {"detail_sections": total, "missing_sections": missing, "short_sections": short}
+    return {"detail_sections": total, "missing_sections": missing, "short_sections": short,
+            "missing_chapters": [ch["title"] for ch in missing_ch],
+            "missing_items": [(d_ch, sec["title"]) for d_ch, sec in missing_items]}
 
 
 _CN = {"〇": 0, "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -507,6 +519,29 @@ def rerun_missing(detail: Path, source: Path, result: dict, yes: bool) -> None:
         print(f"  ✗ {e}")
 
 
+def rerun_compact(compact: Path, result: dict, yes: bool) -> None:
+    m = re.match(r"^(\d+)-2\s+(.+)\.md$", compact.name)
+    if not m:
+        print("无法从文件名解析书籍 id，跳过精简版重跑", file=sys.stderr)
+        return
+    titles = set(result.get("missing_chapters") or [])
+    titles |= {ch for ch, _sec in (result.get("missing_items") or [])}
+    nums = sorted({n for t in titles if (n := chapter_no(t, None))})
+    cmd = [sys.executable, ".claude/skills/book-to-question/scripts/compact_stage.py",
+           "run", "--id", m.group(1)]
+    if nums:
+        cmd += ["--chapters", *[str(n) for n in nums]]
+    cmd += ["--yes"]
+    print("\n精简版重跑命令（整本重跑）：\n  " + " ".join(cmd))
+    if not yes:
+        print("确认后加 --yes 执行。")
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    shutil.copy2(compact, compact.with_name(compact.name + f".bak-rerun-{stamp}"))
+    rc = subprocess.run(cmd, cwd=str(REPO_ROOT)).returncode
+    print(f"精简版重跑结束，退出码 {rc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="按章/节检查详细版或精简版的完整性（只读）")
     p.add_argument("--detail", required=True, help="详细版 Markdown")
@@ -547,17 +582,29 @@ def main(argv: list[str] | None = None) -> int:
     if compact:
         result["compact"] = check_compact(detail, compact, args.compact_min_ratio, errors, warns)
 
+    filled_total = 0
     if (args.fill or args.rerun) and source and result.get("detail", {}).get("missing_sections"):
-        filled, still = fill_missing(detail, source, result["detail"], apply=args.yes)
-        print(f"从 agent 产物补节：{filled} 节；仍缺 {len(still)} 节")
-        if args.yes and filled:
-            errors, warns = [], []
+        ref = read_source(source)
+        filled, still = fill_missing(
+            detail, ref, result["detail"], args.yes,
+            provider=lambda ch, need: agent_section_blocks(source, ch, need),
+        )
+        filled_total += filled
+        print(f"详细版从 agent 产物补节：{filled} 节；仍缺 {len(still)} 节")
+    if (args.fill or args.rerun) and compact and result.get("compact", {}).get("missing_sections"):
+        ref = parse_doc(read_text_any(detail))
+        filled, still = fill_missing(compact, ref, result["compact"], args.yes)
+        filled_total += filled
+        print(f"精简版从详细版补节：{filled} 节；仍缺 {len(still)} 节")
+    if args.yes and filled_total:
+        errors, warns = [], []
+        if source:
             result["detail"] = check_detail(detail, source, args.min_ratio, errors, warns)
-            if compact:
-                e2, w2 = [], []
-                result["compact"] = check_compact(detail, compact, args.compact_min_ratio, e2, w2)
-                errors += e2
-                warns += w2
+        if compact:
+            e2, w2 = [], []
+            result["compact"] = check_compact(detail, compact, args.compact_min_ratio, e2, w2)
+            errors += e2
+            warns += w2
 
     if args.json:
         print(json.dumps({"errors": errors, "warnings": warns, "stats": result},
@@ -581,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n通过。" if not errors else f"\n错误 {len(errors)} 条。")
     if args.rerun and errors and source and "detail" in result:
         rerun_missing(detail, source, result["detail"], args.yes)
+    if args.rerun and errors and compact and result.get("compact", {}).get("missing_sections"):
+        rerun_compact(compact, result["compact"], args.yes)
     return 1 if errors else 0
 
 

@@ -63,6 +63,8 @@
 ```
 
 - 详细版有的节在精简版找不到就是 error；精简版节长度 <详细版 10% 告警。
+- 缺节先加 `--fill --yes`：从详细版对应节直接补入，不调模型；写盘前备份 `.bak-fill-<时间戳>`。
+- 详细版也没有该节时，先补详细版；仍缺再加 `--rerun --yes`，按缺失章重跑精简版（`compact_stage.py run --chapters`）。
 - 通过后 `book.json` 的 `stages.compact` 记为 `done`。
 
 ## 3b. 图片按详细版回链
