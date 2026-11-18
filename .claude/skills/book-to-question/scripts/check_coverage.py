@@ -219,6 +219,124 @@ def match_sections(src_secs: list[dict], dst_secs: list[dict]):
     return pairs, missing, extra
 
 
+def chapter_ranges(lines: list[str]) -> list[tuple[int, int, str]]:
+    heads = [(i, m.group(2).strip()) for i, line in enumerate(lines)
+             if (m := HEAD.match(line))]
+    chapters = [(i, t) for i, t in heads
+                if CHAP.match(t) or t.startswith("附录")]
+    out = []
+    for pos, (start, title) in enumerate(chapters):
+        end = chapters[pos + 1][0] if pos + 1 < len(chapters) else len(lines)
+        out.append((start, end, title))
+    return out
+
+
+def split_chapter_sections(lines: list[str], start: int, end: int):
+    secs = []
+    first = None
+    cur = None
+    for i in range(start + 1, end):
+        m = HEAD.match(lines[i])
+        if not m:
+            continue
+        title = m.group(2).strip()
+        if _pattern_section(title) and not _ignored(title):
+            if cur is not None:
+                secs.append((cur[0], lines[cur[1]:i]))
+            else:
+                first = i
+            cur = (title, i)
+    if cur is not None:
+        secs.append((cur[0], lines[cur[1]:end]))
+    preamble_end = first if first is not None else end
+    return lines[start:preamble_end], secs
+
+
+def agent_section_blocks(source: Path, chapter_title: str, need: list[str]) -> dict[str, tuple[str, str]]:
+    n = chapter_no(chapter_title, source)
+    files: list[Path] = []
+    if n:
+        for ext in ("doubao_from_source.md", "deepseek_from_source.md"):
+            files.extend(sorted(source.glob(f"*第{n}章*.{ext}")))
+    found: dict[str, tuple[str, str]] = {}
+    for p in files:
+        for ch in parse_doc(read_text_any(p)):
+            if ch["title"] and chapter_title:
+                r = SequenceMatcher(None, norm_chapter(ch["title"]), norm_chapter(chapter_title)).ratio()
+                if r < 0.60:
+                    continue
+            for sec in ch["sections"]:
+                for title in need:
+                    key = norm_title(title)
+                    if key in found:
+                        continue
+                    r = SequenceMatcher(None, norm_title(sec["title"]), key).ratio()
+                    if r >= 0.85:
+                        found[key] = (sec["title"], sec["body"])
+    return found
+
+
+def agent_block(title: str, body: str) -> list[str]:
+    out = [f"### {title}", ""]
+    for ln in body.splitlines():
+        m = HEAD.match(ln)
+        if m:
+            level = max(4, len(m.group(1)))
+            out.append("#" * level + " " + m.group(2).strip())
+        else:
+            out.append(ln)
+    return out
+
+
+def fill_missing(detail: Path, source: Path, result: dict, apply: bool) -> tuple[int, list[tuple[str, str]]]:
+    text = read_text_any(detail)
+    lines = text.splitlines()
+    src_by_norm = {norm_chapter(ch["title"]): ch for ch in read_source(source)}
+    missing_by_ch: dict[str, list[str]] = {}
+    for ch, sec in result.get("missing_items") or []:
+        missing_by_ch.setdefault(ch, []).append(sec)
+    replacements = []
+    filled = 0
+    still: list[tuple[str, str]] = []
+    for start, end, ch_title in chapter_ranges(lines):
+        if ch_title not in missing_by_ch:
+            continue
+        src_ch = src_by_norm.get(norm_chapter(ch_title))
+        if src_ch is None:
+            continue
+        missing = {norm_title(t) for t in missing_by_ch[ch_title]}
+        preamble, dsecs = split_chapter_sections(lines, start, end)
+        dmap = {norm_title(t): (t, block) for t, block in dsecs}
+        need = [s["title"] for s in src_ch["sections"] if norm_title(s["title"]) in missing]
+        ab = agent_section_blocks(source, ch_title, need)
+        new = list(preamble)
+        used = set()
+        for sec in src_ch["sections"]:
+            k = norm_title(sec["title"])
+            if k in dmap:
+                new.extend(dmap[k][1])
+                used.add(k)
+            elif k in missing:
+                if k in ab:
+                    new.extend(agent_block(*ab[k]))
+                    filled += 1
+                    used.add(k)
+                else:
+                    still.append((ch_title, sec["title"]))
+        src_keys = {norm_title(s["title"]) for s in src_ch["sections"]}
+        for k, (_t, block) in dmap.items():
+            if k not in used and k not in src_keys:
+                new.extend(block)
+        replacements.append((start, end, new))
+    if apply and filled:
+        for start, end, new in sorted(replacements, reverse=True):
+            lines[start:end] = new
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        shutil.copy2(detail, detail.with_name(detail.name + f".bak-fill-{stamp}"))
+        detail.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8-sig")
+    return filled, still
+
+
 def check_detail(detail: Path, source: Path, min_ratio: float, errors: list, warns: list):
     src_chapters = read_source(source)
     det_chapters = parse_doc(read_text_any(detail))
@@ -398,9 +516,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="详细版节长度 / 原文节长度 的最低比例（默认 0.20）")
     p.add_argument("--compact-min-ratio", type=float, default=0.10,
                    help="精简版节长度 / 详细版节长度 的最低比例（默认 0.10）")
+    p.add_argument("--fill", action="store_true",
+                   help="先从豆包/DeepSeek 分节产物补缺失节；不调模型")
     p.add_argument("--rerun", action="store_true",
-                   help="对缺失节所在章重跑 chapter_pipeline（整章重跑，会调模型）")
-    p.add_argument("--yes", action="store_true", help="与 --rerun 一起用，真正执行重跑")
+                   help="对仍缺失的节所在章重跑 chapter_pipeline（整章重跑，会调模型）")
+    p.add_argument("--yes", action="store_true", help="与 --fill/--rerun 一起用，真正写盘/执行")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
@@ -426,6 +546,18 @@ def main(argv: list[str] | None = None) -> int:
         result["detail"] = check_detail(detail, source, args.min_ratio, errors, warns)
     if compact:
         result["compact"] = check_compact(detail, compact, args.compact_min_ratio, errors, warns)
+
+    if (args.fill or args.rerun) and source and result.get("detail", {}).get("missing_sections"):
+        filled, still = fill_missing(detail, source, result["detail"], apply=args.yes)
+        print(f"从 agent 产物补节：{filled} 节；仍缺 {len(still)} 节")
+        if args.yes and filled:
+            errors, warns = [], []
+            result["detail"] = check_detail(detail, source, args.min_ratio, errors, warns)
+            if compact:
+                e2, w2 = [], []
+                result["compact"] = check_compact(detail, compact, args.compact_min_ratio, e2, w2)
+                errors += e2
+                warns += w2
 
     if args.json:
         print(json.dumps({"errors": errors, "warnings": warns, "stats": result},

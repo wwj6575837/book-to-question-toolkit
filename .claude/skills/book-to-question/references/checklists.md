@@ -39,7 +39,7 @@
 ## 阶段 2/3：详细版校对
 
 - [ ] 章节是否有遗漏；和 `000-文件索引.md`、`book.json.chapters` 对得上。
-- [ ] 已跑 `check_coverage.py --detail <详细版> --source <organized 目录>`：缺失节为 0，过短节已看过；确实缺节时用 `--rerun` 预览、`--yes` 按章重跑。
+- [ ] 已跑 `check_coverage.py --detail <详细版> --source <organized 目录>`：缺失节为 0，过短节已看过；缺节先用 `--fill --yes` 从 agent 产物补，仍缺再 `--rerun --yes` 按章重跑。
 - [ ] 内容是否流畅，有没有截断、重复、错序。
 - [ ] 删除「参考图 1-10」「例图」这类指代文字。
 - [ ] 行内公式统一用 `$...$`；没有残留 `\(...\)`（存量文件先跑 `fix_render.py --apply`）。
