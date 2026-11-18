@@ -116,6 +116,19 @@
 
   逐条调用 DeepSeek（默认 `deepseek-v4-flash`，需 `DEEPSEEK_API_KEY`，最多 20 条）；每条修完重新用 KaTeX 验证，无法判断时输出 `__UNFIXABLE__` 并保留原样。明显是更长公式片段（如 `A={x`、`x>2}`）时脚本直接跳过、不调模型，这类通常是 `$` 位置错误，需要人工合并。
 
+## 3b. 节级完整性（清理补齐之后、上题之前）
+
+```powershell
+.venv\Scripts\python.exe .claude\skills\book-to-question\scripts\check_coverage.py `
+  --detail "exports\multi_agent\final\书籍库\<id>-1 <书名>.md" `
+  --source "exports\Organized_Books\<id>-<书名>_organized"
+```
+
+- 按「章 → 节」比对原文与详细版；原文有的节在详细版找不到就是 error，节长度 <原文 20% 告警。
+- 节被挪到别的章（如实训节并入附录）只告警“节位置不同”，不算缺失。
+- 缺失节可加 `--rerun` 预览重跑命令，确认后加 `--yes` 执行。`chapter_pipeline` 只有章级粒度，会重跑缺失节所在的整章并调用模型；重跑前自动备份详细版为 `.bak-rerun-<时间戳>`。
+- `--json` 输出结构化结果，便于接自动化。
+
 ## 4. 上传语雀详细版
 
 见 [yuque-upload.md](yuque-upload.md) 的「详细版」一节。

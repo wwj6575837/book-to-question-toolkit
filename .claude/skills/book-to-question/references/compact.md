@@ -53,6 +53,16 @@
 
 - 产物：`exports\multi_agent\final\精简版\<id>-2 <书名>.md`。
 - 检查 `##` 数量、空章、重复标题、体积比；有警告就人工抽查。
+
+再做一次节级覆盖检查，确认精简版保留了详细版的每一节：
+
+```powershell
+.venv\Scripts\python.exe .claude\skills\book-to-question\scripts\check_coverage.py `
+  --detail "exports\multi_agent\final\书籍库\<id>-1 <书名>.md" `
+  --compact "exports\multi_agent\final\精简版\<id>-2 <书名>.md"
+```
+
+- 详细版有的节在精简版找不到就是 error；精简版节长度 <详细版 10% 告警。
 - 通过后 `book.json` 的 `stages.compact` 记为 `done`。
 
 ## 3b. 图片按详细版回链
